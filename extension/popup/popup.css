@@ -1,0 +1,126 @@
+:root {
+  --fg: #15141a;
+  --muted: #5b5b66;
+  --bg: #ffffff;
+  --border: #d7d7db;
+  --accent: #0060df;
+  --ok: #17803d;
+  --warn: #a47f00;
+  --err: #c50042;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #fbfbfe;
+    --muted: #b1b1b3;
+    --bg: #2a2a2e;
+    --border: #4a4a4f;
+    --accent: #00ddff;
+    --ok: #3dd68c;
+    --warn: #ffbd4f;
+    --err: #ff6a75;
+  }
+}
+
+body {
+  margin: 0;
+  min-width: 21rem;
+  font: message-box;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--bg);
+}
+
+main {
+  padding: 1rem;
+}
+
+h1 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+button {
+  font: inherit;
+  padding: 0.4rem 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  cursor: pointer;
+}
+
+button.primary {
+  width: 100%;
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+  font-weight: 600;
+  padding: 0.55rem;
+}
+
+/* 深色主题下 accent 变亮，前景色要跟着变深才够对比 */
+@media (prefers-color-scheme: dark) {
+  button.primary {
+    color: #15141a;
+  }
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+button.link {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  text-decoration: underline;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.meta {
+  margin: 0.25rem 0 0;
+  font-size: 0.9em;
+  color: var(--muted);
+}
+
+.hint {
+  margin: 0.75rem 0 0;
+  padding: 0.5rem;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--fg);
+}
+
+.ok {
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.warn {
+  margin: 0.5rem 0 0;
+  font-size: 0.9em;
+  color: var(--warn);
+}
+
+.err {
+  color: var(--err);
+  font-weight: 600;
+}
+
+#notices:empty {
+  display: none;
+}
+
+footer {
+  display: flex;
+  gap: 1rem;
+  padding: 0.5rem 1rem 0.75rem;
+  border-top: 1px solid var(--border);
+}

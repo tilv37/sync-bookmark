@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>BM Sync 设置</title>
+    <style>
+      :root {
+        --fg: #15141a;
+        --muted: #5b5b66;
+        --bg: #fff;
+        --border: #d7d7db;
+        --accent: #0060df;
+        --ok: #17803d;
+        --err: #c50042;
+        --warn: #a47f00;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #fbfbfe; --muted: #b1b1b3; --bg: #2a2a2e;
+          --border: #4a4a4f; --accent: #00ddff; --ok: #3dd68c; --err: #ff6a75;
+          --warn: #ffbd4f;
+        }
+      }
+      * { box-sizing: border-box; }
+      body {
+        font: message-box; font-size: 13px; color: var(--fg);
+        background: var(--bg); margin: 0 auto; padding: 2rem 1.5rem 4rem; max-width: 40rem;
+      }
+      h1 { font-size: 1.3rem; margin: 0 0 0.25rem; }
+      h2 { font-size: 1rem; margin: 2rem 0 0.5rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+      .hint { color: var(--muted); margin: 0 0 1.5rem; }
+      label { display: block; margin: 1rem 0 0.3rem; font-weight: 600; }
+      .sub { font-weight: 400; color: var(--muted); font-size: 0.9em; display: block; margin-top: 0.15rem; }
+      input[type="text"], input[type="password"] {
+        width: 100%; padding: 0.45rem; margin-top: 0.25rem;
+        border: 1px solid var(--border); border-radius: 4px;
+        background: var(--bg); color: var(--fg); font: inherit;
+      }
+      button {
+        font: inherit; padding: 0.45rem 1rem; margin-top: 1rem;
+        border: 1px solid var(--border); border-radius: 4px;
+        background: var(--bg); color: var(--fg); cursor: pointer;
+      }
+      button.primary { background: var(--accent); border-color: transparent; color: #fff; font-weight: 600; }
+      @media (prefers-color-scheme: dark) { button.primary { color: #15141a; } }
+      button.danger { color: var(--err); border-color: var(--err); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+      .status { margin: 0.5rem 0 0; font-size: 0.9em; }
+      .ok { color: var(--ok); } .err { color: var(--err); } .warn { color: var(--warn); }
+      fieldset { border: 1px solid var(--border); border-radius: 4px; margin: 0.5rem 0 0; padding: 0.5rem 0.75rem 0.75rem; }
+      legend { font-weight: 600; padding: 0 0.3rem; }
+      label.check { display: flex; align-items: center; gap: 0.4rem; font-weight: 400; margin: 0.35rem 0; }
+      table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; font-size: 0.9em; }
+      th, td { text-align: left; padding: 0.3rem 0.4rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+      th { color: var(--muted); font-weight: 600; }
+      code { background: color-mix(in srgb, var(--fg) 8%, transparent); padding: 0 0.2em; border-radius: 2px; }
+    </style>
+  </head>
+  <body>
+    <h1>BM Sync 设置</h1>
+    <p class="hint">书签在你自己的服务器上合并。反代（证书、HTTPS）由 Nginx Proxy Manager 负责。</p>
+
+    <h2>连接</h2>
+
+    <label for="serverUrl">
+      服务器地址
+      <span class="sub">只需填域名，可省略 <code>https://</code> 与 <code>/api</code></span>
+    </label>
+    <input id="serverUrl" type="text" placeholder="bmsync.example.com" spellcheck="false" />
+
+    <label for="token">
+      访问令牌
+      <span class="sub">与服务器的 <code>BMSYNC_TOKEN</code> 一致</span>
+    </label>
+    <div class="row">
+      <input id="token" type="password" placeholder="openssl rand -hex 32" spellcheck="false" />
+      <button id="toggleToken" type="button">显示</button>
+    </div>
+
+    <div class="row">
+      <button id="test" class="primary" type="button">测试连接</button>
+      <button id="save" type="button">保存</button>
+    </div>
+    <p id="connStatus" class="status"></p>
+
+    <h2>同步范围</h2>
+    <fieldset>
+      <legend>纳入同步的根目录</legend>
+      <label class="check"><input type="checkbox" id="rootToolbar" /> 书签栏</label>
+      <label class="check"><input type="checkbox" id="rootMenu" /> 菜单</label>
+      <label class="check"><input type="checkbox" id="rootUnfiled" /> 其他书签</label>
+      <label class="check"><input type="checkbox" id="rootMobile" /> 移动设备书签</label>
+      <p class="status muted">
+        移动设备书签默认排除：桌面端通常用不上，且在手机上会产生大量无意义同步。
+      </p>
+    </fieldset>
+
+    <h2>冲突记录</h2>
+    <div class="row">
+      <button id="loadConflicts" type="button">刷新</button>
+      <span class="status muted">冲突按时间戳静默决胜，这里只做查看</span>
+    </div>
+    <div id="conflictBox"></div>
+
+    <h2>历史快照</h2>
+    <div class="row">
+      <button id="loadHistory" type="button">刷新</button>
+      <span class="status muted">服务端每次成功写入前自动快照，保留最近 30 份</span>
+    </div>
+    <div id="historyBox"></div>
+
+    <h2>危险操作</h2>
+    <p class="status muted">
+      清空本地缓存并重新同步。<strong>不会删除云端数据</strong>，下次同步会把云端状态重新拉回来。
+    </p>
+    <button id="reset" class="danger" type="button">清空本地缓存</button>
+    <p id="resetStatus" class="status"></p>
+
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

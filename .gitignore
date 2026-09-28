@@ -1,0 +1,40 @@
+# ---- 密钥与本地数据（绝不入库）----
+# 注意用 .env* 而不是 .env，这样 .env.local 之类的变体也一并拦住。
+# 兜底规则很重要：deploy/.env 写错了路径就可能漏掉。
+.env
+.env.*
+!.env.example
+deploy/data/
+deploy/backup/
+*.pem
+*.key
+!*.example
+
+# ---- 构建产物 ----
+bmsync/bmsync
+bmsync/bmsync.exe
+bmsync/dist/
+*.test
+*.out
+coverage.*
+
+# ---- 跨平台编译验证的临时产物（test/all.sh 生成，用完即删）----
+test/bmsync-linux
+test/bmsync-darwin
+bmsync/cov
+bmsync/cov.out
+
+# ---- 扩展打包产物 ----
+extension/dist/
+extension/*.xpi
+extension/*.zip
+
+# ---- 测试工具 ----
+test/jsonq/jsonq
+test/jsonq/jsonq.exe
+
+# ---- 编辑器 ----
+.idea/
+.vscode/
+*.swp
+.DS_Store

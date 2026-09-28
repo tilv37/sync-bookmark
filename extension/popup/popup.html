@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>BM Sync</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>BM Sync</h1>
+      <button id="sync" class="primary">立即同步</button>
+
+      <p id="status" class="muted">正在读取状态…</p>
+      <p id="last-sync" class="meta">上次同步：从未</p>
+      <p id="cached" class="meta"></p>
+
+      <p id="first-run" class="hint" hidden>
+        首次使用需要先配置服务器地址与访问令牌。
+      </p>
+
+      <div id="notices" hidden>
+        <p id="clock-warning" class="warn"></p>
+        <p id="conflicts" class="warn"></p>
+        <p id="warnings" class="warn"></p>
+      </div>
+    </main>
+
+    <footer>
+      <button id="open-options" class="link">设置</button>
+      <button id="view-conflicts" class="link">冲突与历史</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,22 @@
+# 换行符策略：仓库内一律 LF，checkout 到工作区也保持 LF。
+#
+# 为什么必须显式写：开发机（Windows）上 core.autocrlf=true，
+# 默认行为会把 checkout 出来的文件转成 CRLF。而本项目有 4 个必须在
+# bash 里跑的脚本（test/*.sh、deploy/backup.sh），CRLF 会让它们
+# 全部失败，症状是莫名其妙的 `$'\r': command not found`。
+#
+# 具体踩过的坑：给用户写的调试文档里让人直接跑 ./test/all.sh，
+# 换一台 Windows 设备就因为换行符全线报错。
+#
+# 本项目没有任何 Windows 原生脚本（.bat / .ps1），所以统一 LF 最省事。
+# 将来若要加 .bat 或 .ps1，在下面单独加 eol=crlf 的规则即可。
+* text=auto eol=lf
+
+# 二进制文件不做换行符转换
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.xpi binary
+*.zip binary
+*.exe binary

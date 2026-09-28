@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "BM Sync",
+  "version": "0.1.0",
+  "description": "手动触发的书签双向同步工具：书签树全量上报到自建服务端合并，支持删除传播。",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bmsync@local",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": ["bookmarks", "storage"],
+  "optional_host_permissions": ["https://*/*"],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "action": {
+    "default_title": "BM Sync",
+    "default_popup": "popup/popup.html"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  }
+}

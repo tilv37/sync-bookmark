@@ -1,0 +1,40 @@
+# bmsync —— 单容器部署
+#
+#   cp .env.example .env && 填入 BMSYNC_TOKEN
+#   docker compose up -d --build
+#
+# 反向代理（TLS 证书 / HTTPS 终结）由 Nginx Proxy Manager 负责，
+# 本项目不包含反代层。详见 docs/design.md §10。
+
+services:
+  bmsync:
+    build: ../bmsync
+    container_name: bmsync
+    restart: unless-stopped
+    environment:
+      BMSYNC_TOKEN: ${BMSYNC_TOKEN:?请在 .env 中设置 BMSYNC_TOKEN}
+      BMSYNC_DATA: /data
+      BMSYNC_ADDR: ":8080"
+      BMSYNC_HISTORY_KEEP: ${BMSYNC_HISTORY_KEEP:-30}
+      BMSYNC_TOMBSTONE_TTL_DAYS: ${BMSYNC_TOMBSTONE_TTL_DAYS:-90}
+    volumes:
+      - ./data:/data
+    # 只绑定回环地址，公网无法直连；NPM 通过宿主机 8080 反代。
+    # 若 NPM 在另一台机器上，改成内网 IP，例如 "192.168.1.10:8080:8080"。
+    ports:
+      - "127.0.0.1:8080:8080"
+    networks: [bmsync]
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      # scratch 镜像无 shell / wget，用二进制自带的子命令
+      test: ["CMD", "/bmsync", "healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  bmsync:
