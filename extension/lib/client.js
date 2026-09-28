@@ -38,10 +38,11 @@ export function normalizeBaseUrl(raw) {
   return `${url.origin}/api`;
 }
 
-/** 当前配置下所需的 host 权限。 */
+/** 当前配置下所需的 host 权限（不带端口：manifest 匹配不认端口）。 */
 export function requiredOrigin(serverUrl) {
   try {
-    return `${new URL(serverUrl).origin}/*`;
+    const u = new URL(serverUrl);
+    return `${u.protocol}//${u.hostname}/*`;
   } catch {
     return null;
   }
@@ -52,6 +53,11 @@ export function requiredOrigin(serverUrl) {
  *
  * Firefox 的 MV3 把站点权限从「安装时授予」改成了「用户手动授予」，
  * 所以首次同步一定会走到这里。见 design.md §9.3。
+ *
+ * ⚠️ 必须在用户手势上下文中调用（popup / options 的 click 处理里直接调）。
+ * background 收到的 runtime.onMessage 已丢了手势，调 request() 会抛
+ * "permissions.request may only be called from a user input handler"。
+ * background 里只准用 hasHostPermission() 做 contains 检查。
  */
 export async function ensureHostPermission(serverUrl) {
   const origin = requiredOrigin(serverUrl);
@@ -61,6 +67,21 @@ export async function ensureHostPermission(serverUrl) {
   if (has) return true;
 
   // request() 必须在用户手势的上下文中调用，否则会被静默拒绝
+  return browser.permissions.request({ origins: [origin] });
+}
+
+/**
+ * 手势上下文专用的权限申请：同步调 request()，前面不做任何 await。
+ *
+ * 为什么要另起一个函数：ensureHostPermission() 先 `await contains()` 再
+ * `request()`，中间的 await 会把点击手势丢掉，Firefox 直接抛
+ * "permissions.request may only be called from a user input handler"。
+ * UI 的 click 处理里必须第一时间调 request()（requiredOrigin 是同步的，
+ * 不丢手势）；已授权时 request() 直接返回 true，不会重复弹窗。
+ */
+export function requestHostPermissionFromGesture(serverUrl) {
+  const origin = requiredOrigin(serverUrl);
+  if (!origin) return Promise.resolve(false);
   return browser.permissions.request({ origins: [origin] });
 }
 
@@ -82,6 +103,19 @@ class SyncError extends Error {
 async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  // 请求摘要只打到本机控制台：方法、路径、body 字节、有无 token，不打 token 明文。
+  try {
+    const bodyBytes = body ? JSON.stringify(body).length : 0;
+    const items = body?.state?.items ? Object.keys(body.state.items).length : null;
+    console.log(
+      `[bmsync] → ${method} ${url} body约${bodyBytes}字节` +
+        (items !== null ? `（state ${items}项）` : '') +
+        (token ? '（带token）' : '（无token）'),
+    );
+  } catch {
+    // 日志失败不阻断请求
+  }
 
   let resp;
   try {
@@ -121,7 +155,18 @@ async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_T
   }
 
   if (!resp.ok) {
-    throw toSyncError(resp.status, data);
+    const syncErr = toSyncError(resp.status, data);
+    try {
+      console.warn(`[bmsync] ← ${method} ${url} HTTP ${resp.status}：${syncErr.message}`);
+    } catch {
+      // 日志失败不改变错误
+    }
+    throw syncErr;
+  }
+  try {
+    console.log(`[bmsync] ← ${method} ${url} HTTP ${resp.status} OK`);
+  } catch {
+    // 日志失败不影响返回
   }
   return data;
 }

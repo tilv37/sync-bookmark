@@ -6,6 +6,7 @@
 !.env.example
 deploy/data/
 deploy/backup/
+tmp-data/
 *.pem
 *.key
 !*.example

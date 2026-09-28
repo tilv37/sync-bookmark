@@ -92,8 +92,12 @@ listeners.getState = async () => {
 };
 
 listeners.testConnection = async (msg) => {
-  const { healthCheck } = await load('lib/client.js');
+  const { healthCheck, hasHostPermission } = await load('lib/client.js');
   try {
+    const granted = await hasHostPermission(msg.serverUrl);
+    if (!granted) {
+      return { ok: false, error: `尚未获得访问 ${msg.serverUrl} 的权限——权限申请必须由设置页的点击手势发起，请确认设置页已更新（about:debugging 点重新加载）后再点测试连接` };
+    }
     const data = await healthCheck(msg.serverUrl);
     return { ok: true, data };
   } catch (err) {

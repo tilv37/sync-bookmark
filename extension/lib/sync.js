@@ -26,7 +26,7 @@ import { HLC } from './hlc.js';
 import { scan, buildState, SCHEMA_VERSION } from './collect.js';
 import { planApply, executePlan } from './apply.js';
 import { loadState, saveState, loadSettings, ensureDeviceId } from './store.js';
-import { sync as httpSync, ensureHostPermission, clockWarning, normalizeBaseUrl } from './client.js';
+import { sync as httpSync, hasHostPermission, clockWarning, normalizeBaseUrl } from './client.js';
 
 /** 生成一个设备标识。 */
 function randomDeviceId() {
@@ -55,10 +55,12 @@ export async function runSync(api, opts = {}) {
     throw new Error('尚未配置访问令牌，请先在设置中填写');
   }
 
-  // Firefox MV3 需要用户手动授予 host 权限（design.md §9.3）
-  const granted = await ensureHostPermission(settings.serverUrl);
+  // Firefox MV3 需要用户手动授予 host 权限（design.md §9.3）。
+  // 权限申请必须在 popup / options 的 click 手势里完成，这里只做检查：
+  // background 的 onMessage 已无手势，调 request() 会直接抛错。
+  const granted = await hasHostPermission(settings.serverUrl);
   if (!granted) {
-    throw new Error(`未获得访问 ${settings.serverUrl} 的权限，请在浏览器中授予后重试`);
+    throw new Error(`未获得访问 ${settings.serverUrl} 的权限，请先在设置页点「测试连接」并在弹窗中允许后重试`);
   }
 
   onPhase?.('scanning');
@@ -81,14 +83,22 @@ export async function runSync(api, opts = {}) {
   onPhase?.('uploading');
 
   // ── 4. 上报 ──────────────────────────────────────────────────
+  // 调试日志只打到本机控制台（含标题/URL，明码），排查完可无视；
+  // 不要把控制台内容贴到公开地方。
+  logOutgoingDiagnostics(outgoing);
   const deviceId = await ensureDeviceId(randomDeviceId);
-  const response = await httpSync({
-    serverUrl: settings.serverUrl,
-    token: settings.token,
-    device: settings.deviceName || deviceId,
-    state: outgoing.state,
-    base: outgoing.base,
-  });
+  let response;
+  try {
+    response = await httpSync({
+      serverUrl: settings.serverUrl,
+      token: settings.token,
+      device: settings.deviceName || deviceId,
+      state: outgoing.state,
+      base: outgoing.base,
+    });
+  } catch (err) {
+    throw augmentValidationError(err, outgoing);
+  }
 
   if (!response || response.state?.v !== SCHEMA_VERSION) {
     throw new Error('服务端返回了无法识别的数据格式，请确认扩展与服务端版本配套');
@@ -145,4 +155,73 @@ function allStamps(state) {
     if (item.a) out.push(item.a);
   }
   return out;
+}
+
+/** UTF-8 字节数（与 Go 端 len() 口径一致；JS 的 .length 是 UTF-16 单元）。 */
+function utf8len(s) {
+  try {
+    return new TextEncoder().encode(s || '').length;
+  } catch {
+    return String(s || '').length;
+  }
+}
+
+/**
+ * 上报前打一遍待发送内容的摘要：项数、payload 字节、标题最长的 5 条。
+ * 定位"服务端拒绝同步：标题/URL超长"时直接看这份日志即可。
+ */
+function logOutgoingDiagnostics(outgoing) {
+  try {
+    const items = outgoing?.state?.items || {};
+    const keys = Object.keys(items);
+    let bytes = 0;
+    try {
+      bytes = utf8len(JSON.stringify(outgoing?.state || {}));
+    } catch {
+      bytes = -1;
+    }
+    console.log(
+      `[bmsync] 上报 state：${keys.length} 项，base ${Object.keys(outgoing?.base || {}).length} 个，` +
+        `state JSON 约 ${bytes} 字节，本地统计 ${JSON.stringify(outgoing?.stats || {})}`,
+    );
+    const ranked = keys
+      .map((k) => ({ k, n: utf8len(items[k]?.n), u: utf8len(items[k]?.u), t: items[k]?.t }))
+      .sort((a, b) => b.n - a.n)
+      .slice(0, 5);
+    for (const r of ranked) {
+      const it = items[r.k];
+      console.log(
+        `[bmsync] 标题最长 top5：key=${r.k} type=${r.t} 标题${r.n}字节 url${r.u}字节` +
+          ` 标题预览=${JSON.stringify(String(it?.n || '').slice(0, 120))}` +
+          ` url预览=${JSON.stringify(String(it?.u || '').slice(0, 120))}`,
+      );
+    }
+  } catch (err) {
+    console.log(`[bmsync] 诊断日志生成失败（不影响同步）：${err?.message || err}`);
+  }
+}
+
+/**
+ * 服务端校验失败时，把报错里那个 32 位 key 对应的本地 item 翻出来：
+ * 控制台打完整条目，抛给 UI 的信息里追加标题预览（截断 200 字）。
+ * 找不到 key 时原样返回。
+ */
+function augmentValidationError(err, outgoing) {
+  try {
+    const msg = err?.message || '';
+    const m = String(msg).match(/[0-9a-f]{32}/);
+    if (!m) return err;
+    const item = outgoing?.state?.items?.[m[0]];
+    if (!item) return err;
+    console.error(
+      `[bmsync] 被服务端拒绝的条目：key=${m[0]} type=${item.t} parent=${item.p} ` +
+        `标题${utf8len(item.n)}字节 url${utf8len(item.u)}字节 ` +
+        `标题全文=${JSON.stringify(item.n)} url=${JSON.stringify(item.u)}`,
+    );
+    err.message =
+      `${msg}（本地标题预览：${JSON.stringify(String(item.n || '').slice(0, 200))}）`;
+  } catch {
+    // 日志增强失败不改变原错误
+  }
+  return err;
 }

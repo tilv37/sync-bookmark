@@ -2,6 +2,10 @@
 //
 // 与 popup 一样，所有读写都经由 background 消息，本页不直接碰
 // IndexedDB —— 设置只有一页，没必要在两处各写一份加载逻辑。
+// 唯一的例外是 host 权限申请：permissions.request 必须在点击手势里调，
+// background 的 onMessage 已无手势，只能由本页直接调。
+
+import { requestHostPermissionFromGesture } from '../lib/client.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -76,6 +80,18 @@ $('test').addEventListener('click', async () => {
     return;
   }
   setStatus($('connStatus'), 'muted', '正在测试…');
+  // 手势上下文中第一时间调 request()：前面加任何 await（哪怕是 contains）
+  // 都会丢手势导致 "may only be called from a user input handler"。
+  try {
+    const granted = await requestHostPermissionFromGesture(url);
+    if (!granted) {
+      setStatus($('connStatus'), 'err', '已拒绝站点访问权限，允许后才能测试连接');
+      return;
+    }
+  } catch (err) {
+    setStatus($('connStatus'), 'err', err?.message || String(err));
+    return;
+  }
   const res = await browser.runtime.sendMessage({ type: 'testConnection', serverUrl: url });
   if (!res?.ok) {
     setStatus($('connStatus'), 'err', res?.error || '连接失败');

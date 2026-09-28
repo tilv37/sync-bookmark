@@ -46,6 +46,9 @@ const (
 	KeyLen = 32
 
 	// MaxURLLen / MaxTitleLen 是单字段长度上限，防御异常超长输入。
+	// 注意：真实书签标题经常超过 1KB（网页 <title> 原样存进来，真机上见过
+	// 2762 字节的），1024 会误伤正常数据。8KB 仍远小于 16MB 请求体上限，
+	// 极端病态输入由 MaxBodyBytes 兜底。
 	MaxURLLen   = 4096
-	MaxTitleLen = 1024
+	MaxTitleLen = 8192
 )

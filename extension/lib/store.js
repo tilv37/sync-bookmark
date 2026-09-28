@@ -51,14 +51,18 @@ async function withStore(mode, fn) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE, mode);
     const store = tx.objectStore(STORE);
-    let result;
+    let req;
     try {
-      result = fn(store);
+      req = fn(store);
     } catch (err) {
       reject(err);
       return;
     }
-    tx.oncomplete = () => resolve(result && result.result !== undefined ? result.result : result);
+    // fn 返回的是 IDBRequest：必须取 req.result，不能把 request 本身 resolve 出去。
+    // 否则 key 不存在时 result 为 undefined，调用方会拿到 IDBRequest 对象，
+    // 再经 runtime.sendMessage 做结构化克隆时直接抛
+    // "IDBRequest object could not be cloned."（首次同步必现：缓存全空）。
+    tx.oncomplete = () => resolve(req != null && typeof req === 'object' && 'result' in req ? req.result : req);
     tx.onerror = () => reject(tx.error);
     tx.onabort = () => reject(tx.error);
   });
