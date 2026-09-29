@@ -1,0 +1,15 @@
+# 构建上下文是仓库根（见 deploy/docker-compose.yml），不是 bmsync/。
+# 原因：HLC 跨端向量 test/hlc_vectors.json 在 bmsync/ 之外，
+# Domain 测试会从二进制目录一路向上找 test/hlc_vectors.json，
+# 上下文给小了它就进不了镜像。
+.git
+tmp-data/
+deploy/data/
+deploy/backup/
+bmsync/out/
+**/bin/
+**/obj/
+test/jsonq/jsonq
+test/jsonq/jsonq.exe
+extension/*.xpi
+extension/*.zip

@@ -1,0 +1,75 @@
+' bmsync —— 代码调用关系（类级，服务端 + 扩展核心）
+' 服务端类名/文件来自知识图谱 class 扫描；扩展侧来自 extension/lib。
+' 箭头 A --> B 表示“A 调用 B”。虚线为“仅数据/类型依赖，不调用”。
+
+@startuml call-graph
+title bmsync 代码调用关系（类级）
+
+package "BookmarkSync.Cli" {
+  class Cli
+  class Program
+}
+package "BookmarkSync.Server" {
+  class BmsyncServer
+  class ApiEndpoints
+  class Auth
+  class RateLimiter
+  class ServerOptions
+  class Healthcheck
+  class HttpJson
+}
+package "BookmarkSync.Store" {
+  class BookmarkStore
+  class FileOps
+  class StoreOptions
+}
+package "BookmarkSync.Domain" {
+  class Merger
+  class State
+  class Hlc
+  class TombstoneGc
+  class Limits
+  class BmsyncJson
+}
+
+Program --> Cli : Main
+Cli --> BmsyncServer : Build(cfg)
+Cli --> Healthcheck : "healthcheck" 子命令
+BmsyncServer --> BookmarkStore : CreateAsync（急切创建）
+BmsyncServer --> ApiEndpoints : MapGet/MapPost
+ApiEndpoints --> Auth : （经中间件）Protect
+Auth --> RateLimiter : allow(ip)
+Auth --> ServerOptions : Token
+ApiEndpoints --> HttpJson : ReadBody/WriteJson/WriteError
+ApiEndpoints --> State : Validate()
+ApiEndpoints --> BookmarkStore : SyncAsync / Get*Count / GetConflicts / ListSnapshots
+BookmarkStore --> Merger : Merge(server, incoming, base, device, now)
+BookmarkStore --> TombstoneGc : CollectFrom
+BookmarkStore --> Hlc : _clock.Update（服务端时钟）
+BookmarkStore --> FileOps : 原子写/快照/读回
+BookmarkStore --> StoreOptions : DataDir/HistoryKeep/TombstoneTtl
+Merger --> Hlc : Compare/ObserveMany（LWW 决胜+因果）
+Merger --> State : SortedUnionKeys/SameContent/不变量
+State --> Limits : MaxItems/MaxDepth/MaxTitleLen/MaxURLLen
+State ..> BmsyncJson : 序列化（omitempty+key 排序对齐）
+
+package "extension/lib（JS，无构建）" {
+  class runSync
+  class collect
+  class apply
+  class client
+  class keys
+  class HLC
+}
+runSync --> collect : scan/buildState（采集+墓碑）
+runSync --> client : sync/healthCheck（上报）
+runSync --> apply : planApply/executePlan（应用权威 state）
+collect --> keys : 身份派生（书签 u: / 文件夹 f:+NUL）
+client ..> runSync : SyncError（非 200 即抛，本地不动）
+HLC ..> Hlc : 逐字节一致（hlc_vectors.json 三方共用）
+
+note bottom of Merger
+  改合并只动 Merger + 对应 MergeTests；
+  改协议同时看 ApiTypes.cs 与 collect.js
+end note
+@enduml

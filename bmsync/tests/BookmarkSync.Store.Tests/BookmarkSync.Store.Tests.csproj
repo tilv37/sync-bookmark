@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
-    用例在服务端从 Go 迁移到 .NET 10 时逐条移植。
+  <!-- 用例在服务端从 Go 迁移到 .NET 10 时逐条移植。 -->
 
   <PropertyGroup>
     <RootNamespace>BookmarkSync.Store.Tests</RootNamespace>

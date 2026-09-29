@@ -413,8 +413,8 @@ public class CliTests
     }
 
     [Theory]
-    [InlineData(":8080", "http://localhost:8080")]
-    [InlineData("0.0.0.0:8080", "http://localhost:8080")]
+    [InlineData(":8080", "http://*:8080")]
+    [InlineData("0.0.0.0:8080", "http://*:8080")]
     [InlineData("127.0.0.1:9999", "http://127.0.0.1:9999")]
     [InlineData("http://example.com:80", "http://example.com:80")]
     public void 监听地址转URL(string addr, string want) =>

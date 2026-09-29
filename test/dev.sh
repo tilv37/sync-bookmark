@@ -1,5 +1,5 @@
 #!/bin/sh
-# 本地开发服务：一键编译并以前台方式起 bmsync，方便调扩展。
+# 本地开发服务：一键发布并以前台方式起 bmsync，方便调扩展。
 #
 # 用法：
 #   ./test/dev.sh [选项]
@@ -8,7 +8,7 @@
 #   --addr ADDR    监听地址，默认 127.0.0.1:18099（可用 BMSYNC_ADDR 覆盖）
 #   --data DIR     数据目录，默认 <仓库根>/tmp-data（可用 BMSYNC_DATA 覆盖）
 #   --token TOKEN  Bearer 令牌，默认开发用固定串（可用 BMSYNC_TOKEN 覆盖）
-#   --no-build     跳过 go build，直接运行已有二进制
+#   --no-build     跳过 dotnet publish，直接运行已有产物
 #   --reset        启动前清空数据目录（删 state.json / conflicts.json / history/）
 #   -h, --help     显示本帮助
 #
@@ -25,7 +25,9 @@ root=$(CDPATH='' cd -- "$script_dir/.." && pwd -P)
 DEFAULT_ADDR="127.0.0.1:18099"
 DEFAULT_DATA="$root/tmp-data"
 DEFAULT_TOKEN="0123456789abcdef0123456789abcdef01234567"
-BIN="$root/bmsync/bmsync"
+# 发布产物目录（.gitignore 已忽略 bmsync/out/）。--no-build 时复用这里。
+OUT="$root/bmsync/out"
+BIN=""
 
 ADDR="${BMSYNC_ADDR:-$DEFAULT_ADDR}"
 DATA_DIR="${BMSYNC_DATA:-$DEFAULT_DATA}"
@@ -59,8 +61,8 @@ health_host() {
     esac
 }
 
-if ! have go && [ "$NO_BUILD" -eq 0 ]; then
-    echo "找不到 go，且未传 --no-build。请先安装 Go ≥ 1.23，或用 --no-build 复用已有二进制。" >&2
+if ! have dotnet && [ "$NO_BUILD" -eq 0 ]; then
+    echo "找不到 dotnet，且未传 --no-build。请先安装 .NET SDK 10，或用 --no-build 复用已有产物。" >&2
     exit 1
 fi
 if ! have curl; then
@@ -79,21 +81,25 @@ fi
 mkdir -p "$DATA_DIR"
 
 if [ "$NO_BUILD" -eq 0 ]; then
-    printf '编译中...\n'
-    (cd "$root/bmsync" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/bmsync) || {
-        echo "编译失败，见上方 go build 输出。" >&2
+    printf '发布中（dotnet publish）...\n'
+    (cd "$root/bmsync" && dotnet publish src/BookmarkSync.Cli -c Release -o "$OUT" -v quiet --nologo) || {
+        echo "发布失败，见上方 dotnet 输出。" >&2
         exit 1
     }
-elif [ ! -x "$BIN" ]; then
-    echo "找不到可执行的 $BIN，先不带 --no-build 跑一次以编译。" >&2
+fi
+# Windows 上是 bmsync.exe，Linux 上是 bmsync。
+if   [ -x "$OUT/bmsync" ];    then BIN="$OUT/bmsync"
+elif [ -x "$OUT/bmsync.exe" ]; then BIN="$OUT/bmsync.exe"
+else
+    echo "找不到可执行的 $OUT/bmsync（或 bmsync.exe），先不带 --no-build 跑一次以发布。" >&2
     exit 1
 fi
 
 # 预检配置：token 长度、数据目录可写等问题在这里提前暴露，
 # 而不是等服务起一半才从日志里翻。
-if ! BMSYNC_TOKEN="$TOKEN" BMSYNC_DATA="$DATA_DIR" BMSYNC_ADDR="$ADDR" "$BIN" -config-check >/dev/null 2>&1; then
+if ! BMSYNC_TOKEN="$TOKEN" BMSYNC_DATA="$DATA_DIR" BMSYNC_ADDR="$ADDR" "$BIN" --config-check >/dev/null 2>&1; then
     echo "配置预检失败，原样再跑一次看报错：" >&2
-    BMSYNC_TOKEN="$TOKEN" BMSYNC_DATA="$DATA_DIR" BMSYNC_ADDR="$ADDR" "$BIN" -config-check
+    BMSYNC_TOKEN="$TOKEN" BMSYNC_DATA="$DATA_DIR" BMSYNC_ADDR="$ADDR" "$BIN" --config-check
     exit 1
 fi
 

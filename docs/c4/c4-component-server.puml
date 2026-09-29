@@ -1,0 +1,27 @@
+' bmsync —— C4 Level 3：服务端组件（对应 bmsync/src 下四个项目）
+' 依赖方向严格单向：Cli → Server → Store → Domain（见 README“为什么分成三个项目”）
+
+@startuml c4-component-server
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Component.puml
+
+title bmsync 服务端组件（C4 Level 3）
+
+Container_Boundary(srv, "bmsync 进程") {
+
+  Component(cli, "BookmarkSync.Cli", "入口", "Program/Cli.Run：healthcheck 子命令、--config-check、Kestrel 启动+优雅关闭\nProgram.cs")
+  Component(build, "BmsyncServer.Build", "组装", "注册 Store/限流/ApiEndpoints；中间件：访问日志 → 鉴权(UseWhen)；映射 4 路由\nBmsyncServer.cs")
+  Component(auth, "Auth.Protect", "信任边界", "先限流后 Bearer 恒定时间比对；XFF 只取第一段\nAuth.cs + RateLimiter.cs")
+  Component(api, "ApiEndpoints", "处理器（薄）", "HandleSyncAsync / HandleHealthAsync / HandleConflictsAsync / HandleHistoryAsync\nApiEndpoints.cs")
+  Component(store, "BookmarkStore", "持久化", "SemaphoreSlim 串行化「读→合并→GC→写」；快照在锁外；冲突缓冲\nBookmarkStore.cs + FileOps.cs")
+  Component(domain, "Domain（纯逻辑）", "领域层", "State.Validate / Merger.Merge / Hlc / TombstoneGc / Limits\n零项目引用、零日志接口")
+
+  Rel(cli, build, "Build(cfg)", "")
+  Rel(build, auth, "挂中间件", "")
+  Rel(build, api, "MapGet/MapPost", "")
+  Rel(api, store, "SyncAsync / 计数 / 冲突 / 快照", "")
+  Rel(api, domain, "State.Validate", "")
+  Rel(store, domain, "Merger.Merge / TombstoneGc / Hlc时钟", "")
+}
+
+' Domain 不引用任何项目：改合并算法只看 bmsync/src/BookmarkSync.Domain/
+@enduml

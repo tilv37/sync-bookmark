@@ -119,7 +119,12 @@ public static class Cli
 
         if (host.Length == 0 || host is "0.0.0.0" or "::" or "[::]")
         {
-            host = "localhost"; // Kestrel 要一个具体主机名，"*:8080" 这种写法它不认
+            // 必须绑所有网卡（Kestrel 认 http://*:port）：Docker 端口映射
+            // DNAT 到容器的 eth0 IP，绑 localhost 的话映射进来的连接会被
+            // RST，而容器内的 healthcheck 自查走 localhost 不受影响 ——
+            // 于是出现“healthy 但外部访问不了”。之前的 localhost 写法
+            // 只在裸机直跑时成立。
+            return $"http://*:{port}";
         }
         else if (host.Contains(':', StringComparison.Ordinal) && !host.StartsWith('['))
         {
