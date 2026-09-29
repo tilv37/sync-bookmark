@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    用例在服务端从 Go 迁移到 .NET 10 时逐条移植。
+
+  <PropertyGroup>
+    <RootNamespace>BookmarkSync.Store.Tests</RootNamespace>
+    <AssemblyName>BookmarkSync.Store.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BookmarkSync.Store\BookmarkSync.Store.csproj" />
+    <ProjectReference Include="..\..\src\BookmarkSync.Domain\BookmarkSync.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

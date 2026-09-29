@@ -32,18 +32,34 @@ script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 HOST="${HOST:-127.0.0.1:18099}"
 TOKEN="${TOKEN:-}"
 API="http://$HOST/api"
-BIN="${BIN:-$script_dir/../bmsync/bmsync}"
+BIN="${BIN:-$script_dir/../bmsync/src/BookmarkSync.Cli/bin/Release/net10.0/bmsync}"
 KILL_PID=""
 DATA_DIR=""
 WORK=""
 
 cleanup() {
-    [ -n "$KILL_PID" ] && kill "$KILL_PID" 2>/dev/null || true
+    # 只在本脚本真的拉起过服务时才杀 —— 上面那个 preflight 失败后 KILL_PID 是空的，
+    # 而 taskkill 按**映像名**杀，会把用户自己正在跑的服务也杀掉。
+    if [ -n "$KILL_PID" ]; then
+        # Git Bash 里的 `kill` 杀不掉原生 Windows 进程：$! 拿到的是 MSYS 的
+        # 内部 PID，和 bmsync.exe 真正的 Windows PID 对不上。
+        # 结果是脚本"跑完了"、服务却还在后台占着端口 —— 下一次跑就
+        # "address already in use"，然后一连串 500 把人带偏到完全错误的方向。
+        # 之所以难查，是因为上一轮明明全绿。
+        #
+        # 按映像名杀（//IM 而不是 //PID）正是因为 PID 不可用。
+        # 本脚本一次只起一个 bmsync，且 KILL_PID 非空才执行，所以不会误伤。
+        if command -v taskkill.exe >/dev/null 2>&1; then
+            taskkill.exe //F //IM "$(basename "$BIN")" >/dev/null 2>&1 || true
+        else
+            kill "$KILL_PID" 2>/dev/null || true
+        fi
+    fi
     [ -n "$DATA_DIR" ] && rm -rf "$DATA_DIR"
     [ -n "$WORK" ] && rm -rf "$WORK"
     return 0
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 pass=0
 fail=0
@@ -76,7 +92,7 @@ setup_json() {
             # 编到源目录（而不是临时目录）是有意的：jsonq/ 已经是一个
             # 独立的 go module，把它当"仓库内的小工具"更符合直觉，
             # 且 .gitignore 里只有一条。
-            (cd "$script_dir/jsonq" && go build -o jsonq .) >/dev/null 2>&1 || true
+            (cd "$script_dir/jsonq" && dotnet publish -o jsonq .) >/dev/null 2>&1 || true
         fi
         if [ -x "$JQ_BIN" ]; then
             MODE=bin
@@ -266,18 +282,45 @@ api_noauth_file() {  # 不带 Authorization
 setup_json
 
 if [ "${1:-}" != "--remote" ]; then
-    if [ ! -x "$BIN" ]; then
-        echo "找不到可执行的 $BIN，先在 bmsync/ 目录跑 go build" >&2
+    # Windows 上产物带 .exe 后缀，且 Git Bash 的 [ -x ] 对它不生效 ——
+    # 少这一段判断的话，脚本在 Windows 上会以"找不到可执行的 bmsync"退出，
+    # 而那个文件其实就在那儿，只是名字不同。
+    if [ ! -f "$BIN" ] && [ ! -f "$BIN.exe" ]; then
+        echo "找不到可执行的 $BIN，先跑：" >&2
+        echo "  cd bmsync && dotnet publish src/BookmarkSync.Cli -c Release -o out" >&2
+        exit 1
+    fi
+    case "$BIN" in *.exe) ;; *) [ -f "$BIN.exe" ] && BIN="$BIN.exe" ;; esac
+
+    # HOST 可能是 ":18099" 这种形式 —— 补成具体主机名，否则 Kestrel 不认，
+    # 而 curl 去连 ":18099" 的症状是"服务起来了但 health 一直不通"。
+    # 必须放在端口预检**之前**：预检用的也是这个 URL。
+    case "$HOST" in
+        :*) HOST="127.0.0.1$HOST" ;;
+    esac
+
+    # 端口预检：先确认没人占着，再起服务。
+    #
+    # 少了这一步，上一次跑崩了留下的后台进程会让这一次直接撞上
+    # "address already in use"，然后**全部 28 项断言都变成 500 失败** ——
+    # 满屏红色，却没有一条提到真正的原因（端口冲突）。
+    # 提前检查并明确报错，比让人从 28 个失败里猜要省事得多。
+    if curl -sf -o /dev/null "http://$HOST/api/health" 2>/dev/null; then
+        echo "端口 $HOST 上已有服务在跑。先停掉它，或换端口：" >&2
+        echo "  HOST=127.0.0.1:18098 $0" >&2
         exit 1
     fi
     DATA_DIR=$(mktemp -d)
     TOKEN="0123456789abcdef0123456789abcdef01234567"
-    # HOST 已经是 "ip:port" 形式，直接用作监听地址。不要再补冒号 ——
-    # ":127.0.0.1:18099" 会被 Go 判为非法地址。
+
     BMSYNC_TOKEN="$TOKEN" BMSYNC_DATA="$DATA_DIR" BMSYNC_ADDR="$HOST" \
         "$BIN" >"$DATA_DIR/server.log" 2>&1 &
     KILL_PID=$!
-    for _ in 1 2 3 4 5 6 7 8 9 10; do
+
+    # 等 10 秒（不是 5 秒）：Release 下 JIT + 源生成 JSON 的首次反序列化
+    # 比 Debug 慢，5 秒在慢机器上会偶发超时 —— 而超时的症状是"服务没起来"，
+    # 与真实的启动失败完全无法区分。
+    for _ in $(seq 1 20); do
         curl -sf -o /dev/null "http://$HOST/api/health" 2>/dev/null && break
         sleep 0.5
     done

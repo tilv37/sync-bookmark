@@ -80,7 +80,7 @@ mkdir -p "$DATA_DIR"
 
 if [ "$NO_BUILD" -eq 0 ]; then
     printf '编译中...\n'
-    (cd "$root/bmsync" && CGO_ENABLED=0 go build -o "$BIN" .) || {
+    (cd "$root/bmsync" && CGO_ENABLED=0 go build -o "$BIN" ./cmd/bmsync) || {
         echo "编译失败，见上方 go build 输出。" >&2
         exit 1
     }

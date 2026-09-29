@@ -161,27 +161,53 @@ for pair in "ROOT_TOOLBAR:toolbar_____" "ROOT_MENU:menu________" \
     fi
 done
 
-# ── 7. Go 端 HLC 常量与 JS 端一致 ────────────────────────────────────
+# Go 端常量所在的源文件。代码分成了 cmd/ + internal/ 三层，
+# 这两个常量都在 internal/bookmarks/ 里 —— 与 hlc.js / collect.js 对应。
+CS_SRC="$script_dir/../bmsync/src/BookmarkSync.Domain"
+CS_HLC="$CS_SRC/Hlc.cs"
+CS_STATE="$CS_SRC/State.cs"
+
+# 先确认文件在：路径写错时 sed 会静默返回空串，后面的比较会给出
+# "两端不一致"这种误导性的错误信息。宁可直接停在这里。
+if [ ! -f "$CS_HLC" ] || [ ! -f "$CS_STATE" ]; then
+    bad "找不到 C# 源码：$CS_HLC / $CS_STATE —— 目录结构变了？需同步更新本脚本"
+    printf '\n\033[1m结果: %d 通过, %d 失败\033[0m\n' "$pass" "$fail"
+    exit 1
+fi
+
+# ── 7. C# 端 HLC 常量与 JS 端一致 ────────────────────────────────────
 section "7. HLC 编码格式两端一致"
-go_digits=$(sed -n 's/.*hlcPhysicalDigits *= *\([0-9]*\).*/\1/p' "$script_dir/../bmsync/hlc.go")
-go_cdigits=$(sed -n 's/.*hlcCounterDigits *= *\([0-9]*\).*/\1/p' "$script_dir/../bmsync/hlc.go")
+cs_digits=$(sed -n 's/.*PhysicalDigits *= *\([0-9]*\).*/\1/p' "$CS_HLC")
+cs_cdigits=$(sed -n 's/.*CounterDigits *= *\([0-9]*\).*/\1/p' "$CS_HLC")
 js_digits=$(sed -n 's/.*PHYSICAL_DIGITS *= *\([0-9]*\).*/\1/p' "$EXT/lib/hlc.js")
 js_cdigits=$(sed -n 's/.*COUNTER_DIGITS *= *\([0-9]*\).*/\1/p' "$EXT/lib/hlc.js")
-if [ "$go_digits" = "$js_digits" ] && [ "$go_cdigits" = "$js_cdigits" ]; then
-    ok "物理位=$go_digits 计数位=$go_cdigits（两端一致）"
+if [ -n "$cs_digits" ] && [ "$cs_digits" = "$js_digits" ] && [ "$cs_cdigits" = "$js_cdigits" ]; then
+    ok "物理位=$cs_digits 计数位=$cs_cdigits（两端一致）"
 else
-    bad "HLC 位宽不一致 Go=($go_digits,$go_cdigits) JS=($js_digits,$js_cdigits)"
+    bad "HLC 位宽不一致 C#=($cs_digits,$cs_cdigits) JS=($js_digits,$js_cdigits)"
 fi
 
 # ── 8. schema 版本两端一致 ───────────────────────────────────────────
 section "8. schema 版本两端一致"
-go_v=$(sed -n 's/^const SchemaVersion *= *\([0-9]*\).*/\1/p' "$script_dir/../bmsync/state.go")
+cs_v=$(sed -n 's/.*public const int Version *= *\([0-9]*\).*/\1/p' "$CS_STATE")
 js_v=$(sed -n 's/^export const SCHEMA_VERSION *= *\([0-9]*\).*/\1/p' "$EXT/lib/collect.js")
-if [ "$go_v" = "$js_v" ] && [ -n "$go_v" ]; then
-    ok "schema v$go_v（两端一致）"
+if [ "$cs_v" = "$js_v" ] && [ -n "$cs_v" ]; then
+    ok "schema v$cs_v（两端一致）"
 else
-    bad "schema 版本不一致 Go='$go_v' JS='$js_v' —— 同步会被服务端以 400 拒绝"
+    bad "schema 版本不一致 C#='$cs_v' JS='$js_v' —— 同步会被服务端以 400 拒绝"
 fi
+
+# ── 9. 四个系统根目录常量两端一致 ────────────────────────────────────
+# 根目录 id 是硬编码字符串，grep 比对比运行任何测试都直接：
+# 它在检查器启动的第一秒就给出结论，而不必先装好 .NET SDK。
+section "9. 根目录常量两端一致"
+for rid in toolbar_____ menu________ unfiled_____ mobile______; do
+    if grep -q "\"$rid\"" "$CS_STATE" && grep -q "'$rid'" "$EXT/lib/keys.js"; then
+        ok "$rid 两端一致"
+    else
+        bad "根目录 id $rid 在 C# 或 JS 端缺失"
+    fi
+done
 
 printf '\n\033[1m结果: %d 通过, %d 失败\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

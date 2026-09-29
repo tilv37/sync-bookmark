@@ -1,0 +1,40 @@
+<Project>
+
+  <!--
+    解决方案级的公共设置。
+
+    为什么单独成文件：可空引用类型、隐式 using、警告等级这几项如果散在
+    7 个 .csproj 里各写一遍，改一次要动七个文件，而且迟早会漏掉一个 ——
+    漏掉的那个会以"这里有个 null 警告"的形式在几个月后冒出来。
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <!--
+      把警告当错误。理由与 Go 侧的 go vet 一样：这不是为了好看，而是因为
+      "警告"在重构期最常见的成因就是**漏改**——把一个类型换了名字，
+      编译器只在某个引用点提示，你却没看见。跨包重构（把整个 Go 实现
+      翻成 C#）正是警告最容易堆积的场景。
+
+      1591 是"缺少 XML 注释"，对本项目无意义：注释我写在代码里（/// <summary>），
+      但没必要为此为每个公开成员补文档——那只会催生大量复述代码的废话注释。
+    -->
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <Product>Bookmark Sync</Product>
+    <Version>1.0.0</Version>
+    <!-- 迁移自 Go 实现，保留原有仓库信息 -->
+    <RepositoryUrl>https://github.com/tilv37/sync-bookmark</RepositoryUrl>
+  </PropertyGroup>
+
+</Project>

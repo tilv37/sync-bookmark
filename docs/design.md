@@ -65,10 +65,10 @@ Floccus 是完整的 CRDT 书签同步引擎（自动同步、加密同步、多
         ┌──────────────────────────────────────────────────┐
         │  VPS                                              │
         │  ┌────────────────────────────────────────────┐  │
-        │  │ bmsync (Go 单二进制, 零第三方依赖)          │  │
+        │  │ bmsync (.NET 10 NativeAOT 单二进制)         │  │
         │  │  ├ auth      Bearer token                  │  │
         │  │  ├ merge     ★ 唯一的合并算法实现          │  │
-        │  │  ├ store     原子写 + 互斥锁                │  │
+        │  │  ├ store     原子写 + 互斥串行化            │  │
         │  │  ├ snapshot  历史快照 (保留 30 份)          │  │
         │  │  └ gc        墓碑清理 (90 天)               │  │
         │  └────────────────────────────────────────────┘  │
@@ -97,7 +97,7 @@ Floccus 是完整的 CRDT 书签同步引擎（自动同步、加密同步、多
 - **采集**：读 Firefox 书签树 → 与本地缓存对比 → 给发生变化的项打上新的 HLC 时间戳 → POST 完整 state
 - **应用**：收到服务端返回的合并结果 → 与采集时的快照做 diff → 把差异 create/update/delete 到 Firefox
 
-**合并算法在整个系统中只存在一份实现（Go 端）。** 这带来三个好处：
+**合并算法在整个系统中只存在一份实现（服务端）。** 这带来三个好处：
 
 1. 不会出现两端合并逻辑不一致导致的分叉
 2. 操作天然幂等，重复点击同步按钮是安全的
@@ -129,7 +129,8 @@ bookmark:  key = hash("u:" + url)
 folder:    key = hash("f:" + parentKey + "\x00" + title)
 ```
 
-- 哈希算法：**SHA-256，取前 16 字节，hex 编码 → 32 字符**（与 Go 端无耦合，因为只有 JS 端计算 key）
+- 哈希算法：**SHA-256，取前 16 字节，hex 编码 → 32 字符**（与服务端无耦合，
+  因为只有扩展端计算 key；服务端只做校验与合并）
 - 分隔符是 **U+0000（NUL）**，避免 URL 或标题中包含分隔符导致的歧义。
   选它而不是 `|` 或 `:`，是因为 URL 与文件夹名里理论上可以出现后两者，
   而 NUL 在 UTF-8 文本中不会出现 —— 它保证拼接结果无歧义。
@@ -582,20 +583,52 @@ Authorization: Bearer <token>
 
 ```
 bmsync/
-├── main.go          入口、路由、优雅关闭
-├── config.go        环境变量与配置
-├── auth.go          Bearer token 校验
-├── state.go         State / Item 类型、Schema 校验
-├── hlc.go           HLC 实现
-├── merge.go         ★ 合并算法
-├── store.go         读写、原子写、互斥锁
-├── snapshot.go      快照与历史
-├── gc.go            墓碑清理
-├── conflict.go      冲突环形缓冲
-└── *_test.go
+├── global.json            SDK 版本（10.0.401，rollForward: latestFeature）
+├── Directory.Build.props   可空引用、隐式 using、警告即错误
+├── Directory.Packages.props  集中包版本管理
+├── src/
+│   ├── BookmarkSync.Domain/   领域层：数据模型 + 合并算法 + HLC + GC
+│   │   ├── State.cs          State / Item 类型、Schema 校验
+│   │   ├── Merge.cs          ★ 合并算法
+│   │   ├── Hlc.cs            HLC 实现
+│   │   ├── TombstoneGc.cs    墓碑清理
+│   │   ├── Limits.cs         领域限额（MaxItems / MaxDepth / 字段长度）
+│   │   ├── StateJsonConverters.cs  JSON 对齐 Go 的 omitempty + key 排序
+│   │   └── DomainJsonContext.cs     源生成上下文（AOT 用）
+│   ├── BookmarkSync.Store/    读写、原子写、互斥串行化、快照
+│   │   ├── BookmarkStore.cs
+│   │   ├── StoreOptions.cs
+│   │   ├── FileOps.cs        平台相关的 rename 重试
+│   │   └── *_test.cs
+│   ├── BookmarkSync.Server/   HTTP 层
+│   │   ├── BmsyncServer.cs    组装 WebApplication、路由表
+│   │   ├── ApiTypes.cs        请求/响应结构（★ 线上协议，改这里要配扩展）
+│   │   ├── ApiEndpoints.cs    四个端点
+│   │   ├── Auth.cs            Bearer token 校验 + 限流中间件（信任边界）
+│   │   ├── HttpJson.cs        解码、编码、限流参数
+│   │   ├── RateLimiter.cs     令牌桶（手写，保持零依赖）
+│   │   ├── ServerOptions.cs   环境变量与配置
+│   │   ├── Healthcheck.cs     docker HEALTHCHECK 实现
+│   │   └── ApiJsonContext.cs  源生成上下文
+│   └── BookmarkSync.Cli/      入口、优雅关闭、healthcheck 子命令
+│       ├── Program.cs         进程 Main
+│       └── Cli.cs
+├── tests/                     三个测试项目，与 src 一一对应
+└── Dockerfile                 多阶段：测试 → NativeAOT → FROM scratch
 ```
 
-**零第三方依赖，只用标准库。** 不引入 web 框架。
+依赖单向：`Cli → Server → Store → Domain`，无人反向引用。
+这样划分的主要目的是让 `Merge.cs` 能脱离 HTTP 被完整测试，同时让
+"信任边界"（`Auth.cs`）在目录上一眼可辨。
+
+**零第三方 NuGet 包。** 生产代码唯一的外部引用是
+`Microsoft.Extensions.Logging.Abstractions`（只取 `ILogger` 接口）；
+HTTP 层用 ASP.NET Core 自带的 Minimal API，不引入 web 框架。
+
+**为什么用源生成的 JSON**：`PublishAot` 会禁用反射式 JSON，
+一旦用到反射就是运行时的硬错误（而不是变慢）。源生成顺带让"哪些类型参与
+序列化"写在代码里，改协议时会看到编译错误。代价是所有 JSON 写出/读入都要
+走 `JsonTypeInfo<T>` 重载（`ApiJson.TypeInfoOf<T>()`）。
 
 ### 8.2 存储布局
 
@@ -856,11 +889,16 @@ NPM 默认的访问日志只记录 URL，**不含请求体**，不需要额外�
 ### 10.5 Dockerfile（多阶段）
 
 ```dockerfile
-FROM golang:1.23-alpine AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS build
 WORKDIR /src
-COPY go.mod ./
+COPY global.json Directory.Build.props Directory.Packages.props ./
+COPY src/*/*.csproj  src/
+COPY tests/*/*.csproj tests/
+RUN dotnet restore
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bmsync .
+RUN dotnet test -c Release --nologo          # 先测试，再做最慢的 AOT 编译
+RUN dotnet publish src/BookmarkSync.Cli -c Release -r linux-x64 \
+        -p:PublishAot=true --output /out
 
 FROM scratch
 COPY --from=build /out/bmsync /bmsync
@@ -869,11 +907,26 @@ EXPOSE 8080
 ENTRYPOINT ["/bmsync"]
 ```
 
-`FROM scratch` + `CGO_ENABLED=0` → 最终镜像约 **8–12 MB**。
+`FROM scratch` + NativeAOT → 最终镜像约 **20–30 MB**（Go 版是 8–12 MB；
+体积差来自 AOT 运行时本身，但换来了"不需要任何 `.so` / `libicu` / `libssl`"）。
+
+> **为什么必须用 NativeAOT**：`scratch` 里没有任何系统库。普通
+> self-contained 发布仍需要 `libcoreclr.so`、`libicu`、OpenSSL 等一堆
+> 文件，得逐个 `COPY` 进去；AOT 把它们全编译进单个二进制。
+>
+> **AOT 不能交叉编译**，所以只能在 Linux 容器里做（Windows 上加
+> `-p:PublishAot=true` 会报 `Cross-OS native compilation is not supported`）。
+> 本地开发因此只验不带 AOT 的发布。
+>
+> **AOT 禁用反射式 JSON**，因此本项目用 System.Text.Json 的源生成器。
+> 代价是所有 JSON 读写都走 `JsonTypeInfo<T>` 重载；收益是协议层的类型名单
+> 写在代码里，且体积/启动都更快。
 
 > **`scratch` 没有 shell，因此 healthcheck 必须用 exec 形式调用二进制自身。**
-> 为此给 Go 二进制增加一个 `healthcheck` 子命令：向
-> `http://127.0.0.1:<BMSYNC_ADDR>/api/health` 发 GET，200 → `os.Exit(0)`，否则 `os.Exit(1)`。
+> 为此给二进制增加一个 `healthcheck` 子命令：向
+> `http://127.0.0.1:<BMSYNC_ADDR>/api/health` 发 GET，校验响应里的
+> `service` 字段是 `bmsync` 再退出。校验 body 是为了防一种坑：反代配错端口，
+> 请求被路由到别的后端，那个后端也返回 200 —— 状态码过关但没人在服务。
 >
 > 备选方案：改用 `alpine` 基础镜像（约 +7 MB），healthcheck 写成
 > `["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/health"]`。
@@ -906,7 +959,43 @@ ls -1t backup/data-*.tar.gz | tail -n +15 | xargs -r rm --
 
 ## 11. 测试策略
 
-### 11.1 Go 端（`go test`）
+### 11.1 服务端（`dotnet test`）
+
+三个测试项目，与 `src/` 下的项目一一对应：
+
+| 项目 | 测什么 |
+|---|---|
+| `BookmarkSync.Domain.Tests` | HLC、合并、GC、JSON 编码 —— 全部纯逻辑，不需要 HTTP 或磁盘 |
+| `BookmarkSync.Store.Tests` | 原子写、快照、冲突缓冲、并发同步不丢更新 |
+| `BookmarkSync.Server.Tests` | 四个端点、鉴权、限流、配置、healthcheck、进程入口 |
+
+HTTP 层的测试**起真实的 Kestrel**（端口 0 由系统分配）而不是
+TestServer：中间件顺序、限流在鉴权之前、Content-Type 这些恰恰是
+"处理器本身完全正确、但管道装错了"的部分，单元测试结构上无法发现。
+（比如 `AddSingleton(async sp => ...)` 被推断成 `Task<T>`，
+所有处理器单测全绿，DI 里却根本没注册那个服务。）
+
+主要测试项：
+
+| 测试项 | 内容 |
+|---|---|
+| HLC 单调性 | 连续 now() 严格递增；update(remote) 后大于 remote；编码字典序 == 时间序 |
+| HLC 因果性 | A 产生 t1 → B update(t1) → B 产生 t2，断言 t2 > t1 |
+| HLC 跨端向量 | 逐条回放 `test/hlc_vectors.json`（Go 生成），证明 C# 实现与之一致 |
+| HLC 时钟回拨 | 手动将物理时钟调回，`l` 不下降 |
+| 合并·单边新增 | 服务端有 A，客户端有 B → 结果含 A、B |
+| 合并·单边删除 | 客户端删 B → 服务端也被删 |
+| 合并·两端改不同项 | A 改 x，B 改 y → 两个改动都保留 |
+| 合并·两端改同一项 | LWW 决胜正确 |
+| 合并·墓碑复活 | 客户端删 → 服务端删 → 客户端重新加 → 复活成功 |
+| 合并·幂等 | merge(M, X) 结果再 merge 结果，状态不变 |
+| 合并·乱序收敛 | A→B 与 B→A 两种顺序得到相同状态 |
+| 合并·base 缺失 | 首次同步（base 为空）不误报冲突 |
+| 合并·冲突检测 | 真并发编辑被记录，单边编辑不被记录 |
+| 合并·随机化收敛 | 400 次随机操作后，以任意顺序重放必须收敛 |
+| GC | 90 天前的墓碑被删，活跃项保留；`x=0` 的墓碑永不删 |
+| 原子写 | 临时文件 + rename；Windows 上占用时指数退避重试 |
+| 限额 | 超量请求返回 413；超限速返回 429 + `Retry-After` |
 
 | 测试项 | 内容 |
 |---|---|
@@ -955,6 +1044,8 @@ ls -1t backup/data-*.tar.gz | tail -n +15 | xargs -r rm --
 - [ ] 断网 → A 同步 → 明确报错，本地书签零变化
 - [ ] 制造时钟偏差（虚拟机改系统时间 ±1 小时）→ 交替同步 → 数据最终一致
 - [ ] 故意让两端同时改同一书签标题 → 同步后查看冲突日志
+- [ ] 书签标题含中文与 emoji → 同步后标题不乱码（验证 JSON 未被转义成 `\uXXXX`）
+- [ ] 书签数超过 6000 条 → 同步不报 413（NPM 的 `client_max_body_size` 放行到位）
 
 ---
 

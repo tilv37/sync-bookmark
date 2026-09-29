@@ -13,7 +13,7 @@
 |---|---|
 | 这是什么 | Firefox 扩展 + 自建服务端，手动触发的书签双向同步，**删除会同步** |
 | 服务端在哪跑 | 你的 VPS，用 Docker Compose 部署；反代用你已有的 Nginx Proxy Manager |
-| 本地怎么跑测试 | `./test/all.sh`（五层，191 个用例） |
+| 本地怎么跑测试 | `./test/all.sh`（五层，258 个用例） |
 | 扩展怎么装 | `about:debugging` → 「临时载入附加组件」→ 选 `extension/manifest.json` |
 | **现在缺什么** | 真机双端同步未验证、Docker 部署未验证、运维文档未写 |
 | **最大的未知数** | 公司网络能否访问你的 VPS 域名 —— 拦了整个方案就废了，且无法绕过 |
@@ -28,21 +28,24 @@
 
 | 现象 | 真实原因 | 怎么办 |
 |---|---|---|
-| `go: 无法识别` | Go 装了但**不在 PATH** | 见 §1.2 |
+| `dotnet: 无法识别` | .NET SDK 装了但**不在 PATH** | 见 §1.2 |
+| `go: 无法识别` | Go 只在跑 `legacy-go/` 对照实现时才需要，不在 PATH | 同上（加 Go 路径） |
 | `node: 无法识别` | 同上 | 同上 |
 | `bash` 跑起来是 WSL | PATH 上的 `bash.exe` 是 Windows 的 WSL 占位符 | 必须显式用 Git 的 bash |
 | `curl --version` 报"无法解析 --version" | **PowerShell 把 `curl` 定义成了 `Invoke-WebRequest` 的别名**，而别名优先级高于 PATH —— 调 PATH 不管用 | PowerShell 里必须写 `curl.exe`。`test/*.sh` 在 bash 里跑，不受别名影响 |
 | `python3: Python was not found` | PATH 上是 Microsoft Store 的占位符 | 脚本会自动降级到 `test/jsonq`，不依赖它 |
 | `npm --version` 被拒绝执行 | PowerShell 执行策略禁止 `.ps1` | 用 `npm.cmd`，或者干脆不用 npm（本项目零 npm 依赖） |
+| `dotnet publish -r linux-x64 -p:PublishAot=true` 报 `Cross-OS native compilation is not supported` | NativeAOT **不能交叉编译** | 正常现象。AOT 只能由 `Dockerfile` 在 Linux 容器里做；本地只验不带 AOT 的发布 |
 
 ### 1.2 一次性设置 PATH
 
 开发机上的实际安装位置（**新设备需要自己确认**）：
 
 ```
-C:\Program Files\Go\bin          Go 1.27.1
-C:\Program Files\nodejs         Node 24.21.0
-C:\Program Files\Git\bin        Git bash
+C:\Program Files\dotnet           .NET SDK 10.0.401
+C:\Program Files\Go\bin           Go 1.27.1（仅 legacy-go/ 对照实现需要）
+C:\Program Files\nodejs          Node 24.21.0
+C:\Program Files\Git\bin         Git bash
 C:\Program Files\Git\mingw64\bin  Git 自带的 curl（见下方注意事项）
 C:\Program Files (x86)\Mozilla Firefox\firefox.exe    Firefox 156.0.1
 ```
@@ -50,10 +53,10 @@ C:\Program Files (x86)\Mozilla Firefox\firefox.exe    Firefox 156.0.1
 在 PowerShell 里给当前会话加好：
 
 ```powershell
-$env:Path = "C:\Program Files\Go\bin;C:\Program Files\nodejs;C:\Program Files\Git\bin;" + $env:Path
+$env:Path = "C:\Program Files\dotnet;C:\Program Files\nodejs;C:\Program Files\Git\bin;" + $env:Path
 
 # 验证
-go version
+dotnet --version      # 必须是 10.0.x
 node --version
 bash --version        # 必须是 GNU bash，不是 WSL
 ```
@@ -76,15 +79,20 @@ Get-Command curl | Select-Object CommandType, Definition
 
 | 工具 | 版本 | 必需性 |
 |---|---|---|
-| Go | ≥ 1.23 | 跑服务端与 Go 测试 |
+| .NET SDK | ≥ 10.0 | 跑服务端与全部 C# 测试 |
 | Node | ≥ 18 | 只用于扩展单元测试；**没有也能跑 `check-extension.sh` 和冒烟** |
 | bash | 任意 | 跑 `test/*.sh` |
 | curl | 任意 | 跑 `test/smoke.sh` |
 | Python 或 jq | 任意 | **可选**。都没有时冒烟脚本会自动编译 `test/jsonq` |
+| Go | ≥ 1.23 | **可选**。只在编译 `legacy-go/` 对照实现、跑它的跨端向量验证时需要 |
 | Docker | 任意 | 部署到 VPS |
 
 > 扩展是纯 ESM，**没有构建步骤、不依赖任何 npm 包**。所以没有 Node 也能改代码、
 > 在 Firefox 里加载，只是跑不了单元测试。
+>
+> 服务端**零第三方 NuGet 包**：唯一的外部引用是
+> `Microsoft.Extensions.Logging.Abstractions`（只取 `ILogger` 接口），
+> 测试用的 xunit 另算。所以没有 NuGet 源也能构建 —— 首次需要还原一次。
 
 ---
 
@@ -99,16 +107,16 @@ cd sync-bookmark
 
 | 层 | 内容 | 依赖 |
 |---|---|---|
-| 1 | 语法检查（shell + `go vet`） | bash, go |
-| 2 | 扩展一致性 | bash |
+| 1 | 语法检查 + C# 编译（警告即错误） | bash, dotnet |
+| 2 | 扩展一致性（17 项） | bash |
 | 3 | 扩展单元测试（90 个用例） | Node 18+ |
-| 4 | Go 单元测试（101 个）+ Linux 交叉编译 | go |
-| 5 | 端到端冒烟（28 项断言） | curl, go |
+| 4 | .NET 单元测试（140 个）+ 覆盖率 + Linux 发布 | dotnet |
+| 5 | 端到端冒烟（28 项断言） | curl, dotnet |
 
-**期望输出**：`全部通过  11 项通过`。有任何 `✗` 先别往下走。
+**期望输出**：`全部通过  12 项通过`。有任何 `✗` 先别往下走。
 
-层与层之间出问题时，先看 `docs/plan.md` 附录 D —— 那 13 条记录了开发期发现的
-实质问题，包括 3 个是补 Node 测试才抓出来的（见 §6）。
+层与层之间出问题时，先看 `docs/plan.md` 附录 D —— 那 15 条记录了开发期
+发现的实质问题，包括 3 个是补 Node 测试才抓出来的（见 §6）。
 
 ---
 
@@ -117,16 +125,26 @@ cd sync-bookmark
 正式部署走 Docker，但**调试扩展时本地跑一个裸二进制更快**：
 
 ```powershell
-# 编译
+# 编译（入口在 src/BookmarkSync.Cli）
 cd bmsync
-go build -o bmsync.exe .
+dotnet publish src/BookmarkSync.Cli -c Release -o out
 
 # 起服务（token 必须 ≥ 32 字符）
 $env:BMSYNC_TOKEN = "0123456789abcdef0123456789abcdef01234567"
 $env:BMSYNC_DATA  = "$PWD\..\tmp-data"
 $env:BMSYNC_ADDR  = "127.0.0.1:18099"
-.\bmsync.exe
+.\out\bmsync.exe
 ```
+
+> 或者直接用 `./test/dev.sh`（Git Bash 里跑）：它会编译、预检配置、
+> **前台**起服务，并打印扩展设置页该填的地址和 token，Ctrl+C 停止。
+> 常用参数：`--reset`（清空数据目录重来）、`--addr`（换端口，
+> 默认 127.0.0.1:18099）、`--no-build`（跳过编译）。完整用法见
+> `./test/dev.sh -h`。
+>
+> 调试扩展时用它比手动敲 `dotnet publish` + 设环境变量省事：它会先跑
+> `-config-check` 预检，token 写错或数据目录不可用会立刻报错并退出，
+> 而不是等服务起一半再从日志里翻。
 
 另开一个窗口验证（**必须写 `curl.exe`**，见 §1.1）：
 
@@ -136,6 +154,12 @@ curl.exe http://127.0.0.1:18099/api/health
 ```
 
 `/api/health` **不需要 token** —— 扩展设置页的「测试连接」依赖这一点。
+
+配置有问题时用这个子命令自查，它只校验配置和数据目录、不会监听端口：
+
+```powershell
+.\out\bmsync.exe -config-check    # 正常输出 "config ok" 并退出码 0
+```
 
 ### 加载扩展
 
@@ -346,17 +370,27 @@ sync-bookmark/
 ├── README.md              ← 项目说明 + 快速上手
 ├── docs/
 │   ├── design.md          设计文档：架构、算法、API、风险
-│   └── plan.md            实施计划 + 13 条实施期问题记录
-├── bmsync/                Go 服务端
-│   ├── merge.go           ★ 合并算法（最核心）
-│   ├── hlc.go             混合逻辑时钟
-│   ├── store.go           原子写、锁、快照
-│   ├── api.go             HTTP 层
-│   └── trace_test.go      HLC 向量回放自检
+│   └── plan.md            实施计划 + 15 条实施期问题记录
+├── bmsync/                .NET 10 服务端
+│   ├── global.json        SDK 钉在 10.0.401
+│   ├── src/
+│   │   ├── BookmarkSync.Domain/   ★ 领域层：数据模型 + 合并 + HLC + GC
+│   │   │   ├── Merge.cs        ★ 合并算法（最核心）
+│   │   │   ├── Hlc.cs          混合逻辑时钟
+│   │   │   ├── State.cs        State / Item 与校验
+│   │   │   ├── TombstoneGc.cs  墓碑清理
+│   │   │   └── StateJsonConverters.cs  JSON 对齐 Go 的 omitempty + key 排序
+│   │   ├── BookmarkSync.Store/    持久化：原子写、锁、快照
+│   │   ├── BookmarkSync.Server/   HTTP：路由、鉴权限流、handlers、配置
+│   │   └── BookmarkSync.Cli/      入口（程序集名 bmsync）
+│   ├── tests/             三个测试项目，与 src 一一对应
+│   └── Dockerfile         多阶段：测试 → NativeAOT → FROM scratch
+├── legacy-go/             ★ Go 对照实现（迁移自 .NET 前保留，不参与构建）
+│   └── bmsync/            完整可编译；test/hlc_vectors.json 由它生成
 ├── extension/             Firefox 扩展（纯 ESM，无构建）
 │   ├── background.js      消息路由与同步编排
 │   ├── lib/
-│   │   ├── hlc.js         ★ 必须与 Go 端逐字节一致
+│   │   ├── hlc.js         ★ 必须与服务端逐字节一致
 │   │   ├── keys.js        身份派生
 │   │   ├── collect.js     采集
 │   │   ├── apply.js       应用
@@ -367,16 +401,26 @@ sync-bookmark/
 └── test/
     ├── all.sh             一条命令跑全部五层
     ├── smoke.sh           端到端冒烟
+    ├── dev.sh             本地联调：编译 + 前台起服务（Ctrl+C 停）
     ├── check-extension.sh 扩展一致性
-    ├── hlc_vectors.json   Go↔JS 跨端验证向量
+    ├── hlc_vectors.json   Go↔C#↔JS 跨端验证向量
     └── jsonq/             冒烟用的迷你 JSON 读取器
 ```
+
+> 找文件时按这个顺序猜：`lib/hlc.js` ↔ `src/BookmarkSync.Domain/Hlc.cs`，
+> `lib/collect.js` ↔ `src/BookmarkSync.Domain/State.cs` + `Merge.cs`，
+> `background.js` ↔ `src/BookmarkSync.Server/`。**改协议要同时看
+> `src/BookmarkSync.Server/ApiTypes.cs`**（JSON 字段名）和 `lib/collect.js`。
 
 ### 改 HLC 之后必须重新生成向量
 
 ```bash
-cd bmsync && go test -run TestHLCExportVectors -v ./...
+cd bmsync && dotnet test --filter "FullyQualifiedName~HlcVector"
 ```
 
-改完记得跑 `TestTraceVectors`（回放自检）确认向量与实现一致。
-向量是**派生物**，不要手工编辑 —— 开发期就因为生成器有 bug 而误导过一次排查方向。
+这条命令同时跑两个方向：回放 `test/hlc_vectors.json`（证明 C# 与 Go 一致），
+以及 C# 独立从头算一遍（抓"回放器和实现共享同一个 bug"的盲区）。
+
+向量是**派生物**，不要手工编辑 —— 开发期就因为生成器有 bug 而误导过一次
+排查方向（docs/plan.md 附录 D 第 13 条）。要重新生成设
+`BMSYNC_WRITE_VECTORS=1`，且目标目录必须已存在（第 15 条）。

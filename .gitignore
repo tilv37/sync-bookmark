@@ -11,19 +11,31 @@ tmp-data/
 *.key
 !*.example
 
-# ---- 构建产物 ----
-bmsync/bmsync
-bmsync/bmsync.exe
+# ---- .NET 构建产物 ----
+# bin/ 与 obj/ 必须全局忽略：.NET 会在每个项目目录下各生成一份，
+# 只写 bmsync/**/bin 的话，新增项目时很容易漏掉而让几百个
+# 编译产物混进 git status。
+[Bb]in/
+[Oo]bj/
+*.user
+*.suo
+bmsync/out/
 bmsync/dist/
-*.test
-*.out
+# 覆盖率报告：test/all.sh 用 --collect:"XPlat Code Coverage" 产出
+TestResults/
+*.coverage
+*.trx
 coverage.*
+bmsync/cov
+bmsync/cov.out
 
 # ---- 跨平台编译验证的临时产物（test/all.sh 生成，用完即删）----
 test/bmsync-linux
 test/bmsync-darwin
-bmsync/cov
-bmsync/cov.out
+
+# 注：曾用于跨实现比对的 Go 参考实现（legacy-go/）在迁移确认后已删除。
+# test/hlc_vectors.json 保留了下来 —— 它现在是三方（HLC 的 C# 与 JS 两侧）
+# 共用的验证向量，不再依赖任何 Go 代码。
 
 # ---- 扩展打包产物 ----
 extension/dist/
@@ -39,3 +51,6 @@ test/jsonq/jsonq.exe
 .vscode/
 *.swp
 .DS_Store
+
+# ---- 本地索引（codebase-memory-mcp，无需入库）----
+.codebase-memory/

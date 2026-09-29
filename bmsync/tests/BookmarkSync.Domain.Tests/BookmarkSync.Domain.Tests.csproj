@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    领域层单元测试。
+
+    用例在服务端从 Go 迁移到 .NET 10 时逐条移植，数量（约 60 个）与原
+    Go 侧保持一致是有意的：如果少了一些，差额往往意味着某个边界在
+    移植时被"顺手简化"了，而那正是最容易悄悄改变行为的地方。
+  -->
+
+  <PropertyGroup>
+    <RootNamespace>BookmarkSync.Domain.Tests</RootNamespace>
+    <AssemblyName>BookmarkSync.Domain.Tests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BookmarkSync.Domain\BookmarkSync.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+
+</Project>

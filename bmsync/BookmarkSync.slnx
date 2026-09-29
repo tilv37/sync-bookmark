@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/BookmarkSync.Cli/BookmarkSync.Cli.csproj" />
+    <Project Path="src/BookmarkSync.Domain/BookmarkSync.Domain.csproj" />
+    <Project Path="src/BookmarkSync.Server/BookmarkSync.Server.csproj" />
+    <Project Path="src/BookmarkSync.Store/BookmarkSync.Store.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/BookmarkSync.Domain.Tests/BookmarkSync.Domain.Tests.csproj" />
+    <Project Path="tests/BookmarkSync.Server.Tests/BookmarkSync.Server.Tests.csproj" />
+    <Project Path="tests/BookmarkSync.Store.Tests/BookmarkSync.Store.Tests.csproj" />
+  </Folder>
+</Solution>

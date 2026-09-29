@@ -1,5 +1,5 @@
 {
-  "note": "由 bmsync/hlc_test.go 的 TestHLCExportVectors 生成。JS 侧必须逐条复现完全相同的 out —— 两端 HLC 不一致会导致合并非确定。",
+  "note": "由 bmsync/internal/bookmarks/hlc_test.go 的 TestHLCExportVectors 生成。JS 侧必须逐条复现完全相同的 out —— 两端 HLC 不一致会导致合并非确定。",
   "layout": "13 位物理毫秒 + '-' + 5 位逻辑计数，例：1790000000000-00042",
   "vectors": [
     {

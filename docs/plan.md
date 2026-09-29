@@ -2,7 +2,19 @@
 
 > 状态：草案 v0.1，待评审
 > 关联文档：[`design.md`](./design.md)
-> 最后更新：2026-09-28
+> 最后更新：2026-09-29（服务端已迁移到 .NET 10）
+
+> ⚠️ **本文是历史记录，不要按里面的路径找文件。** P0–P5 各阶段的任务清单写的是
+> **Go 版**的文件名（`bmsync/main.go`、`bmsync/merge.go` 等）。之后发生了两次
+> 结构性变更：
+>
+> 1. **目录重构**（第 14 条）：Go 代码拆成 `cmd/bmsync` + `internal/{bookmarks,store,server}`。
+> 2. **迁移到 .NET 10**（第 16 条）：服务端现在是 `bmsync/src/BookmarkSync.{Domain,Store,Server,Cli}`，
+>    Go 实现原封不动保留在 `legacy-go/` 作为跨实现比对的参照。
+>
+> 当前目录结构见 [`README.md`](../README.md)；两次变更的原因分别记在
+> [附录 D 第 14 条](#补充说明go-代码重构第-14-条) 与
+> [第 16 条](#补充说明迁移到-net-10第-16-条)。
 
 ---
 
@@ -521,6 +533,64 @@ Go 覆盖率 84.4%，Linux 静态交叉编译通过。
 | 11 | **`apply.js` 查不到"本地已有但本次不变"的父目录** | 严重。书签移动到这类目录时静默失败，move 报"父目录不存在"但同步报告成功 | 已修。`planApply` 现在返回 `ffIdByKey`（全部已存在节点的 id） |
 | 12 | **`collect.js` 用了未 import 的 `ROOT_MOBILE`** | 阻塞。一调用 `scan()` 就抛 `is not defined` | 已修。`check-extension.sh` 只能查 import 路径是否存在，查不出漏掉的符号——这属于"必须真跑一遍"的盲区 |
 | 13 | **HLC 向量生成器自身有 bug** | 高（诊断误导）。`step` 闭包里无条件多调一次 `now()`，把错误状态固化进向量文件。症状表现为"Go 与 JS 实现不一致"，指向完全错误的方向 | 已修生成器，并加了独立的回放自检 `TestTraceVectors` —— 抓"生成器自己验证自己"这类盲区 |
+| 14 | **Go 代码 20+ 文件平铺在一个目录** | 中（可维护性）。`merge.go` 这个全项目最该被精读的算法，和 `ratelimit.go`、`transient_windows.go` 混在一起；`package main` 意味着领域代码无法作为库被 import 或单独测试；改动 `api.go` 之类的基础设施文件时无从判断影响面 | 拆成 `cmd/bmsync` + `internal/{bookmarks,store,server}` 三层，依赖单向。顺带修掉两处被平铺掩盖的问题：`config_test.go` 里混着 store 的 `renameWithRetry` 测试和 healthcheck 测试；`RunHealthcheck` 原本在 `package main` 里，只能靠起真进程测。详见下方补充说明 |
+| 15 | **HLC 向量导出用 `MkdirAll`，路径写错时静默成功** | 高（假绿灯）。包目录移动后 `TestHLCExportVectors` 把向量写到了新造的 `bmsync/internal/test/` 里，而 Go 的 `TestTraceVectors` 和 JS 侧读的仍是仓库根那份旧文件。**两边全绿，但跨端验证从未真的发生** —— 和第 13 条同类的"验证器自己骗自己" | 去掉 `MkdirAll`，目标目录不存在时直接 `t.Fatal`（路径错必须是硬错误，不能靠建目录"解决"）；写入后立刻回读比对。已用两次变异测试确认能拦住：路径退回旧写法、路径指向不存在的更深目录，都明确报错 |
+| 16 | **服务端从 Go 迁移到 .NET 10** | 中（风险）。`FROM scratch` 镜像要求产物不依赖任何系统库，而 .NET 的 self-contained 发布仍需要 `libcoreclr.so` / `libicu` / OpenSSL —— 只有 NativeAOT 能编进单个二进制 | AOT 禁用反射式 JSON（`Reflection-based serialization has been disabled`），改用 System.Text.Json 源生成器。同时发现 AOT **不能交叉编译**（Windows 上报 `Cross-OS native compilation is not supported`），所以 AOT 只能由 Dockerfile 在 Linux 容器里做，本地只验 IL 发布。Go 实现保留在 `legacy-go/`，`test/hlc_vectors.json` 仍由它生成，C# 侧逐条回放以证明两套实现字节等价 |
+
+#### 补充说明：Go 代码重构（第 14 条）
+
+按依赖方向切成三层，理由是**让 `merge.go` 不再被基础设施淹没**：
+
+```
+cmd/bmsync  →  server  →  store  →  bookmarks
+```
+
+`bookmarks` 层（`state.go` / `merge.go` / `hlc.go` / `gc.go`）不 import 任何
+外部包，也完全不引用 store / server —— 合并算法因此能在不启动 HTTP 的情况
+下被完整测试（该包覆盖率 94.9%，绝大部分是合并路径）。
+
+过程中值得记下的三件事：
+
+1. **`store` 原本依赖 `server.Config` 和 `server.SnapshotInfo`**，是反向依赖。
+   处置是给 `store` 一个自己的最小 `Config`（3 个字段），
+   `SnapshotInfo` 移入 `store`（它描述的是磁盘上那个文件，属于存储层事实）。
+2. **测试脚手架必须各包复制一份**。Go 不支持跨包共享 `_test.go`，且
+   `store.Config` 与 `server.Config` 本来就是两个类型。重复是标准做法，
+   不值得为了消除重复把测试辅助代码塞进生产包。
+3. **两处统计脚本因目录变化而静默失效**：`all.sh` 的用例计数用
+   `bmsync/*_test.go` 硬编码 glob，移动后匹配到 0 个却仍报"通过"（实际是
+   0 用例）；覆盖率取 `min` 时把无测试文件的 `cmd/bmsync` 的
+   `coverage: 0.0%` 算了进去，永远显示 0%。**假绿灯比红灯更危险**——
+   修法不只是改路径，而是让脚本在这两种情况下显式报错。
+
+#### 补充说明：迁移到 .NET 10（第 16 条）
+
+Go 代码原封不动挪到 `legacy-go/`，不参与构建与部署，但仍可单独编译。
+`test/hlc_vectors.json` 继续由它生成，C# 侧逐条回放 —— 这是"两套实现
+字节等价"最直接的证据。
+
+迁移过程中真正花时间的三件事，都不是翻译语法，而是**跨语言/跨框架的
+隐式行为差异**：
+
+1. **JSON 的 `omitempty` 在 C# 里不成立**。`JsonIgnoreCondition.WhenWritingDefault`
+   对 `string` 判断的是 `null`，而 `""` 不是 null，所以照样写出 `"u":""`；
+   Go 的 `omitempty` 判断 `== ""`，会省略。已用最小复现程序确认，不靠记忆。
+   处置是手写 `ItemJsonConverter` / `StateJsonConverter`（同时解决 key 排序：
+   Go 序列化 map 会排序，.NET 的 Dictionary 按插入顺序）。
+
+2. **非 ASCII 转义会让体积涨 6 倍**。.NET 默认把中文写成 `中`，
+   Go 原样输出 UTF-8。书签标题大量含中文，默认设置会让 5000 条书签的请求体
+   从约 800KB 涨到 4MB，直接撞上 nginx 的 `client_max_body_size`。
+   处置是全局用 `UnsafeRelaxedJsonEscaping`。
+   实测确认它仍会转义非 BMP 字符（emoji），而
+   `JavaScriptEncoder.Create(UnicodeRanges.All)` 更糟（把 `& < > "` 也转义）。
+   这处**已知且刻意接受**的分歧记在 `JsonParityTests` 里，由测试钉住现状。
+
+3. **源生成会绕过自定义转换器**。为满足 AOT 用了
+   `JsonSerializerContext` 之后，源生成器会为 `State` 生成自己的元数据，
+   绕过上面那个负责 key 排序与 omitempty 的转换器。症状是
+   "state.json 顺序乱了、体积大了" —— 编译通过、测试通过、接口照常 200，
+   没有任何报错。唯一能发现它的方式是拿两份输出逐字节对比。
 
 ### 补上 Node 测试后又发现
 

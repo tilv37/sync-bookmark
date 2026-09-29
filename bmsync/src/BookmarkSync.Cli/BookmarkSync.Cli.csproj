@@ -1,0 +1,53 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    进程入口：启动 Kestrel、注册中间件与路由、优雅关闭、healthcheck 子命令。
+
+    用 Web SDK 而不是普通 Exe：入口需要引用 ASP.NET Core 的
+    WebApplication 类型。AssemblyName 固定为 bmsync —— 不是为了好看，
+    而是 docker HEALTHCHECK 与运维文档里都写死了 /bmsync，
+    改这个名字会让已部署的容器集体变成 unhealthy。
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>BookmarkSync.Cli</RootNamespace>
+    <AssemblyName>bmsync</AssemblyName>
+
+    <!--
+      两条设置必须分开，因为它们解的是两个不同的问题：
+
+      1. JsonSerializerIsReflectionEnabledByDefault=false —— **始终**生效。
+         它让"用了反射式 JSON"变成运行时的硬错误而不是静默的慢路径。
+         之所以要常开：本项目用 System.Text.Json 源生成器
+         （见 Server/ApiJsonContext.cs），协议层的类型名单写在代码里，
+         改协议时会立刻看到编译错误。默认值是 true，一旦有人写了
+         JsonSerializer.Serialize(someAnonymousType)，本地开发能跑、
+         发布到 scratch 镜像时才炸 —— 那是最坏的时机。
+
+      2. PublishAot —— **只在发布时**开启，由 Dockerfile 传
+         -p:PublishAot=true 触发。
+         NativeAOT 让产物不再需要 .so / libicu / libssl，这是 FROM scratch
+         唯一可行的方式；但它要 C++ 链接器（Windows 上要 Visual Studio 的
+         "Desktop Development with C++" 工作负载，Linux 上要 clang），
+         而**不能交叉编译**：在 Windows 上 publish -r linux-x64 会得到
+         "Cross-OS native compilation is not supported"。所以它必须
+         留给 Linux 容器去做，本地开发机跑不了。
+    -->
+    <JsonSerializerIsReflectionEnabledByDefault>false</JsonSerializerIsReflectionEnabledByDefault>
+    <PublishAot Condition="'$(PublishAot)' == ''">false</PublishAot>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <StackTraceSupport>false</StackTraceSupport>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BookmarkSync.Server\BookmarkSync.Server.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BookmarkSync.Server.Tests" />
+  </ItemGroup>
+
+  <!-- 同 Server.csproj：Web SDK 隐式引用 ASP.NET Core，不重复声明。 -->
+
+</Project>

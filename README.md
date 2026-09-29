@@ -15,10 +15,10 @@
 - **公司 PC**：点一下同步，书签树（含文件夹层级）完整还原
 - 两边各自新增、修改、**删除**，最终收敛到一致
 - 冲突静默 LWW，但留下可查的字段级日志
-- 服务端约 12 MB 单二进制，零第三方依赖，无反代层（用你自己的 Nginx Proxy Manager）
+- 服务端约 20–30 MB 单二进制（NativeAOT），零第三方依赖，无反代层（用你自己的 Nginx Proxy Manager）
 
 不是 Floccus 的复刻。Floccus 是完整的 CRDT 引擎（自动同步、加密同步、多后端）；
-这个只做手动触发的最小内核，Go 服务端 + 纯 JS 扩展，无构建步骤。
+这个只做手动触发的最小内核，.NET 10 服务端 + 纯 JS 扩展，无构建步骤。
 
 ---
 
@@ -78,7 +78,7 @@ cd extension && zip -r ../bmsync.xpi *
 ```
 扩展采集书签树 → POST /api/sync (state + base)
                       ↓
-              Go 服务端做合并（LWW + HLC）
+              服务端做合并（LWW + HLC）
                       ↓
               返回权威 state → 扩展应用到本地书签树
 ```
@@ -114,7 +114,8 @@ bookmarks API 只给本地整数 id，跨设备不可用，所以 key 由内容�
 HLC（混合逻辑时钟）保证因果序：只要 A 端先发生的操作、B 端后看到了，B 端此后
 产生的任何时间戳都严格大于它。与实际时钟差多少无关。
 
-Go 与 JS 两端的 HLC 实现必须逐字节一致，由 `test/hlc_vectors.json` 交叉验证。
+服务端（C#）与扩展（JS）两端的 HLC 实现必须逐字节一致，由
+`test/hlc_vectors.json` 交叉验证 —— 两侧各自逐条复现同一份向量。
 
 ---
 
@@ -130,48 +131,73 @@ Go 与 JS 两端的 HLC 实现必须逐字节一致，由 `test/hlc_vectors.json
 
 | 层 | 内容 | 依赖 |
 |---|---|---|
-| 1 | 语法检查 | bash / go |
+| 1 | 语法检查 + C# 编译（警告即错误） | bash / dotnet |
 | 2 | 扩展一致性（id、import、两端常量） | bash |
 | 3 | 扩展单元测试 | **Node 18+** |
-| 4 | Go 单元测试 + Linux 交叉编译 | go |
-| 5 | 端到端冒烟（真 HTTP + 真落盘） | curl + go |
+| 4 | .NET 单元测试 + 覆盖率 + Linux 发布 | dotnet |
+| 5 | 端到端冒烟（真 HTTP + 真落盘） | curl + dotnet |
 
 **不硬依赖 Node** —— 有就跑第 3 层，没有就明确跳过（而不是假装通过）。
 
-当前状态：**191 个测试全绿**
+当前状态：**258 个测试全绿**
 
 ```
-扩展  90 个用例（hlc / keys / collect / apply）
-Go   101 个用例，覆盖率 84.4%
-冒烟  28 项断言
-一致性 13 项
+扩展    90 个用例（hlc / keys / collect / apply）
+.NET   140 个用例（Domain 109 / Store 25 / Server 46）
+冒烟    28 项断言
+一致性  17 项
 ```
+
+覆盖率按包看（最低的是 Domain 那一档）：
+
+```
+BookmarkSync.Domain.Tests  41.2%
+BookmarkSync.Server.Tests  59.2%
+BookmarkSync.Store.Tests   76.8%
+```
+
+> 覆盖率数字**只统计被测项目本身**，所以 Domain 那一档偏低是正常的：
+> 它下面的 Store 与 Server 代码由各自的测试项目统计，不重复计入。
 
 ### 单独跑某一层
 
 ```bash
 ./test/check-extension.sh    # 扩展一致性：id/import/常量两端比对
 ./test/smoke.sh              # 端到端：起真服务，跑真实 HTTP
-cd bmsync && go test ./...   # Go 单元测试
-cd bmsync && go test -race   # 竞态检测（需要 CGO）
+./test/dev.sh                # 本地联调：编译并前台起服务，打印地址与 token
+cd bmsync && dotnet test     # .NET 单元测试（整个解决方案）
+cd bmsync && dotnet test --collect:"XPlat Code Coverage"   # 带覆盖率
 ```
+
+> 需要 .NET SDK 10。`global.json` 钉在 10.0.401 并设 `rollForward: latestFeature`，
+> 所以装了任何 10.0.x 都能用。没有 SDK 时 `all.sh` 会明确跳过 .NET 那一层，
+> 而不是假装通过。
 
 `check-extension.sh` 会在**没有 Node 的机器上**替你抓住这类问题：
 后台注册了但界面没调的 handler、引用了不存在的 HTML id、import 路径写错、
-根目录常量 / HLC 位宽 / schema 版本与 Go 端不一致。
+根目录常量 / HLC 位宽 / schema 版本与服务端不一致。
 
 > 它自己也做过变异测试：故意注入 5 个不存在的 id，确认每一个都被抓到。
 > 检查器抓不到问题时，它给出的"通过"是假的。
 
 ### 改过 HLC 之后必须重新生成跨端向量
 
-Go 与 JS 的 HLC 必须逐字节一致，否则合并在"时间戳恰好相等"时非确定：
+C# 与 JS 的 HLC 必须逐字节一致，否则合并在"时间戳恰好相等"时非确定：
 
 ```bash
-cd bmsync && go test -run TestHLCExportVectors -v ./...
+cd bmsync && dotnet test --filter "FullyQualifiedName~HlcVector"
 ```
 
-这会重写 `test/hlc_vectors.json`，JS 侧的向量测试据此逐条复现。
+这条命令同时跑两个方向的验证：
+
+- `HlcVectorTests.回放Go生成的向量` —— 逐条复现 `test/hlc_vectors.json`。
+- `从头计算的结果与向量一致` —— C# 独立从头算一遍。两者互为镜像：
+  只有一个的话，"回放器和实现共享同一个 bug"这类盲区就抓不到
+  （详见 docs/plan.md 附录 D 第 13 条）。
+
+`HlcVectorExportTests.BuildVectors()` 是生成器，默认**不**写文件。
+要真的重新生成给 JS 用，设 `BMSYNC_WRITE_VECTORS=1`；且目标目录必须
+已存在，否则直接失败 —— 路径写错必须是硬错误（附录 D 第 15 条）。
 
 ### 跨平台构建
 
@@ -179,8 +205,16 @@ cd bmsync && go test -run TestHLCExportVectors -v ./...
 
 ```bash
 cd bmsync
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o bmsync .
+dotnet publish src/BookmarkSync.Cli -c Release -r linux-x64 --self-contained true -o out
 ```
+
+入口在 `src/BookmarkSync.Cli`，程序集名固定为 `bmsync`（healthcheck 依赖它）。
+
+**NativeAOT 留给 Docker**：生产镜像要用 `FROM scratch`，那要求产物不依赖
+任何 `.so` / `libicu` / `libssl`，只有 AOT 能做到。但 AOT 需要 C++ 链接器，
+而且**不能交叉编译** —— 在 Windows 上加 `-p:PublishAot=true` 会报
+"Cross-OS native compilation is not supported"。所以本地只验 IL 发布，
+AOT 交给 `Dockerfile` 在 Linux 容器里做。
 
 ### 扩展
 
@@ -194,7 +228,7 @@ cd extension && node --test lib/*.test.js
 
 | 文件 | 测什么 |
 |---|---|
-| `lib/hlc.test.js` | **跨端向量验证** —— 逐条复现 Go 生成的 `test/hlc_vectors.json` |
+| `lib/hlc.test.js` | **跨端向量验证** —— 逐条复现 `test/hlc_vectors.json`（与 C#、Go 三方共用） |
 | `lib/keys.test.js` | 身份派生：稳定性、NUL 分隔符无歧义、书签 key 不含父目录、根目录常量 |
 | `lib/collect.test.js` | 六种变更情形、删除子树全量墓碑、base 的作用 |
 | `lib/apply.test.js` | 三条顺序约束、删除只发一次 remove、**往返一致性** |
@@ -207,18 +241,25 @@ Firefox 的真实行为（用有无 url 区分类型、四个根目录固定 id�
 ## 目录结构
 
 ```
-bmsync/            Go 服务端（约 1400 行）
-  hlc.go           混合逻辑时钟
-  merge.go         ★ 合并算法（项目最核心的代码）
-  state.go         数据模型与校验
-  gc.go            墓碑清理
-  store.go         原子写、互斥锁、快照
-  api.go           HTTP 层
-  ratelimit.go     令牌桶（手写，保持零依赖）
-  *_test.go        100 个用例，约 2700 行
+bmsync/            .NET 10 服务端
+  global.json      SDK 版本钉在 10.0.401
+  Directory.Build.props / Directory.Packages.props
+  src/
+    BookmarkSync.Domain/  ★ 领域层：数据模型 + 合并算法 + HLC + GC
+      Hlc.cs            混合逻辑时钟（与 lib/hlc.js 逐字节对应）
+      State.cs          State / Item 类型与校验、schema 版本
+      Merge.cs          ★ 合并算法，项目最核心的代码
+      TombstoneGc.cs    墓碑清理
+      Limits.cs         领域限额
+      StateJsonConverters.cs  JSON 逐字节对齐 Go 的 omitempty + key 排序
+    BookmarkSync.Store/   持久化：原子写、互斥串行化、历史快照
+    BookmarkSync.Server/  HTTP 层：路由、鉴权限流、handlers、配置
+    BookmarkSync.Cli/     入口（程序集名 bmsync）：启动、优雅关闭、healthcheck
+  tests/                  三个测试项目，与 src 一一对应
+  Dockerfile              多阶段构建：测试 → NativeAOT → FROM scratch
 extension/         Firefox 扩展（纯 ESM，无构建、无框架）
   background.js    消息路由与同步编排
-  lib/hlc.js       必须与 Go 端逐字节一致
+  lib/hlc.js       必须与服务端逐字节一致
   lib/keys.js      身份派生
   lib/collect.js   采集：书签树 → state
   lib/apply.js     应用：state → 书签树
@@ -233,10 +274,33 @@ HANDOVER.md         交接文档：真机调试用的环境陷阱、验证清单
 test/
   all.sh                 一条命令跑全部检查
   smoke.sh               端到端冒烟（真实 HTTP + 真实落盘）
+  dev.sh                 本地联调：编译并前台起服务，打印地址与 token
   check-extension.sh     扩展一致性（不需要 Node）
-  hlc_vectors.json       Go↔JS 的 HLC 交叉验证向量
+  hlc_vectors.json       C#↔JS 的 HLC 交叉验证向量（两端口径一致）
   jsonq/                 冒烟脚本用的迷你 JSON 读取器
 ```
+
+### 为什么分成三个项目
+
+依赖是单向的，从上到下没人反向引用：
+
+```
+Cli  →  Server  →  Store  →  Domain
+（入口）  （HTTP）    （落盘）    （数据模型 + 合并算法）
+```
+
+这么分的主要收益是 **`Merge.cs` 不再被 HTTP 代码淹没**。合并算法是这个
+项目里唯一需要反复精读的东西，而它必须能在完全不启动 HTTP 的情况下被
+完整测试。
+
+配套的两条约定：
+
+- **`BookmarkSync.Domain` 不引用任何其他项目**，连日志接口都不碰。
+  它是纯领域逻辑，输入输出都是值类型。
+- **`BookmarkSync.Store` 有自己的最小 `StoreOptions`**（只要 `DataDir` /
+  `HistoryKeep` / `TombstoneTtl`），不复用 `ServerOptions`。让持久化层
+  依赖 HTTP 层会把依赖方向反过来，而那两个多余字段（`Token` / `Addr`）
+  对存储层毫无意义。
 
 ---
 

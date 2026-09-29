@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    HTTP 层：路由、鉴权、限流、请求/响应编解码。
+
+    用 ASP.NET Core Minimal API 而不是 MVC / 控制器：这里没有视图、
+    没有模型绑定、没有内容协商需求，多一层抽象只会让"这个端点到底
+    校验了什么"变得需要跳转才能回答。四个端点短到可以一眼读完。
+
+    它是唯一持有"信任边界"的项目（Authentication.cs），所以那个文件的
+    每一次改动都应该是有意识的决定，而不是顺手重构。
+  -->
+
+  <PropertyGroup>
+    <!--
+      Web SDK 的默认输出类型是 Exe，但这个项目是库：真正的入口在
+      BookmarkSync.Cli。沿用默认值会得到 CS5001（找不到 Main）。
+    -->
+    <OutputType>Library</OutputType>
+    <RootNamespace>BookmarkSync.Server</RootNamespace>
+    <AssemblyName>BookmarkSync.Server</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BookmarkSync.Store\BookmarkSync.Store.csproj" />
+    <ProjectReference Include="..\BookmarkSync.Domain\BookmarkSync.Domain.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="BookmarkSync.Server.Tests" />
+  </ItemGroup>
+
+  <!--
+    不写 <FrameworkReference Include="Microsoft.AspNetCore.App" />：
+    Web SDK 已经隐式引用它，显式再写一次会触发 NETSDK1086 警告，
+    而本解决方案 TreatWarningsAsErrors=true，那会让构建直接失败。
+  -->
+
+</Project>

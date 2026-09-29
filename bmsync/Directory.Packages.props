@@ -1,0 +1,31 @@
+<Project>
+  <!--
+    集中包版本管理（Central Package Management）。
+
+    为什么要开：xunit 在 3 个测试项目里被引用，版本号写在三处时，
+    迟早会出现"两个项目用 2.9.3、一个用 2.9.2"的情况 —— 而 xunit 的
+    测试宿主对版本组合是敏感的，那类问题表现为"某个测试项目莫名不跑
+    某些用例"，极难定位。集中之后版本只有一处，且不允许项目自己覆盖。
+
+    版本号选择：测试相关的包刻意钉在本机 NuGet 缓存里已有的版本，
+    这样在断网环境也能 restore —— 维护这台项目的机器经常在没网的地方。
+  -->
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup Label="Runtime">
+    <!--
+      版本与 .NET 10 共享框架（10.0.12）对齐，不追更高的补丁版本：
+      域层和存储层只需要 ILogger 接口，引一个更新的包会让人误以为
+      需要匹配某个更新的运行时。
+    -->
+    <PackageVersion Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.12" />
+    <PackageVersion Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.12" />
+  </ItemGroup>
+  <ItemGroup Label="Test">
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageVersion Include="coverlet.collector" Version="6.0.4" />
+  </ItemGroup>
+</Project>
