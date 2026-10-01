@@ -6,8 +6,15 @@ For daily use, package and sign the extension (`extension/manifest.json`,
 currently `0.1.0`):
 
 ```bash
-cd extension && zip -r ../bmsync.xpi *
+cd extension && rm -f bmsync.xpi bmsync.zip && zip -r ../bmsync.xpi * \
+  -x 'lib/*.test.js' 'lib/mock-bookmarks.js' '*.zip' '*.xpi'
 ```
+
+Test files and the `browser.bookmarks` mock are dev-only (no production file
+imports them); excluding
+them keeps the reviewed package to exactly what runs. Always delete a
+previous zip first: `zip -r` would otherwise nest the old archive inside
+the new one.
 
 Then submit `bmsync.xpi` for signing at
 [addons.mozilla.org](https://addons.mozilla.org) (AMO): self-distribution
