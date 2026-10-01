@@ -1,11 +1,31 @@
 # Firefox Add-ons (AMO) listing — BM Sync
 
-Store listing copy in English and Chinese. Paste into the Developer Hub
-listing fields (`Summary` ≤ 120 characters; `Description` accepts Markdown).
+Store listing copy in English and Chinese for the Developer Hub submission
+form. Both `概述` (summary) and `描述` (description) fields want their key
+points inside 250 characters; the description also accepts longer text and
+partial Markdown.
 
 ---
 
-## English
+## 描述 field (submission form — EN para 248 chars, whole block 617)
+
+The form recommends 250 characters and asks that the most important points
+fit inside the first 250; longer text is accepted. The English paragraph
+(248 chars) alone carries all critical facts: cannot run alone, needs the
+self-hosted open-source server, ~30 MB Docker image, no third parties, repo
+URL. Paste as-is (plain text works; the form supports partial Markdown).
+
+```text
+⚠️ BM Sync cannot work alone: it must be paired with its open-source server (Docker image, ~30 MB, buildable from source, self-hosted). Bookmarks only reach your own server, never third parties. Source: https://github.com/tilv37/sync-bookmark (MIT)
+⚠️ 本插件不能独立使用：必须搭配开源的配套服务端，部署在你自己的机器上（Docker 镜像约 30 MB，可从源码自行编译）。书签只会传输到你自己的服务器，绝不经过任何第三方。开源地址：https://github.com/tilv37/sync-bookmark（MIT 协议）
+
+Getting started: 1) deploy the server (docker compose up -d; steps in the repo README) 2) enter server URL + token in Settings 3) click Sync now.
+快速上手：1) 部署服务端（docker compose up -d，步骤见仓库 README） 2) 在设置页填入服务器地址与令牌 3) 点击“立即同步”。
+```
+
+---
+
+## English (long-form listing description)
 
 ### Summary (99 chars)
 
