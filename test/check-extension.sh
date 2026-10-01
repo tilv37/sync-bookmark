@@ -150,6 +150,12 @@ for f in $(sed -n 's/.*"default_popup": *"\([^"]*\)".*/\1/p' "$EXT/manifest.json
          $(sed -n 's/.*"page": *"\([^"]*\)".*/\1/p' "$EXT/manifest.json"); do
     [ -f "$EXT/$f" ] || missing_manifest="$missing_manifest $f"
 done
+# Icons declared in "icons" / "default_icon" must ship in the package:
+# AMO rejects the upload when a declared icon file is missing or has
+# different dimensions than declared (48/96 here).
+for f in $(sed -n 's/.*"[0-9][0-9]*": *"\([^"]*\.png\)".*/\1/p; s/.*"default_icon": *"\([^"]*\)".*/\1/p' "$EXT/manifest.json"); do
+    [ -f "$EXT/$f" ] || missing_manifest="$missing_manifest $f"
+done
 [ -z "$missing_manifest" ] && ok "manifest pages all exist" \
     || bad "manifest points at missing files:$missing_manifest"
 

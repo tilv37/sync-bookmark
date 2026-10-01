@@ -30,10 +30,11 @@ since Nov 2025) — the upload is rejected without it. This extension declares
 names) is transmitted to the user's own server, which is the extension's
 stated purpose. `test/check-extension.sh` §10 guards this declaration.
 
-The zip includes `extension/icon.png` (600×600 source): it serves as the
-toolbar icon (`action.default_icon`), the add-on listing icons (`icons`
-48/96, scaled by Firefox), the popup/options headers, and the options-tab
-favicon — no extra assets needed.
+The zip includes three icon files derived from the `extension/icon.png` source
+(600×600): `icon-48.png` / `icon-96.png` are the manifest-declared toolbar and
+listing icons (exact pixel sizes — AMO rejects mismatches), while `icon.png`
+feeds the popup/options headers and the README logo. Regenerate the sized
+copies after any artwork change (Pillow LANCZOS downscale is fine).
 
 ## Server image publish
 

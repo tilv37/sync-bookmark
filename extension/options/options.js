@@ -112,39 +112,78 @@ $('test').addEventListener('click', async () => {
 
 function renderConflicts(list) {
   const box = $('conflictBox');
+  box.replaceChildren();
   if (!list.length) {
-    box.innerHTML = '<p class="status muted">No conflict records.</p>';
+    box.append(statusPara('muted', 'No conflict records.'));
     return;
   }
-  const rows = list
-    .map((conflict) => {
-      const when = new Date(conflict.at).toLocaleString();
-      const field = { parent: 'Parent', type: 'Type', title: 'Title', url: 'URL' }[conflict.field] || conflict.field;
-      const who = conflict.winner === 'server' ? 'Server won' : `${conflict.loser || 'Peer'} edit kept`;
-      return `<tr>
-        <td>${when}</td>
-        <td>${field}</td>
-        <td>"${escapeHtml(conflict.loserValue ?? '')}" → "${escapeHtml(conflict.winnerValue ?? '')}"<br />
-            <span class="muted">${who}</span></td>
-      </tr>`;
-    })
-    .join('');
-  box.innerHTML = `<table>
-      <thead><tr><th>Time</th><th>Field</th><th>Change</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>`;
+  box.append(
+    buildTable(
+      ['Time', 'Field', 'Change'],
+      list.map((conflict) => {
+        const when = new Date(conflict.at).toLocaleString();
+        const field =
+          { parent: 'Parent', type: 'Type', title: 'Title', url: 'URL' }[conflict.field] ||
+          conflict.field;
+        const who = conflict.winner === 'server' ? 'Server won' : `${conflict.loser || 'Peer'} edit kept`;
+        // Every dynamic value travels via textContent (see buildTable):
+        // server-provided titles, URLs, and device names can never become markup.
+        return [when, field, [`"${conflict.loserValue ?? ''}" → "${conflict.winnerValue ?? ''}"`, who]];
+      }),
+    ),
+  );
 }
 
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (ch) =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch],
-  );
+// Builds a <table> purely from text: all cell content is assigned through
+// textContent, so unsanitized server strings can never become markup.
+// A cell is either a string, or a [mainLine, noteLine] pair rendered as a
+// two-line cell with the second line muted.
+function buildTable(headers, rows) {
+  const table = document.createElement('table');
+  const headRow = document.createElement('tr');
+  for (const label of headers) {
+    const th = document.createElement('th');
+    th.textContent = label;
+    headRow.append(th);
+  }
+  const thead = document.createElement('thead');
+  thead.append(headRow);
+  table.append(thead);
+  const tbody = document.createElement('tbody');
+  for (const cells of rows) {
+    const row = document.createElement('tr');
+    for (const cell of cells) {
+      const td = document.createElement('td');
+      if (Array.isArray(cell)) {
+        td.textContent = cell[0];
+        const note = document.createElement('span');
+        note.className = 'muted';
+        note.textContent = cell[1];
+        td.append(document.createElement('br'), note);
+      } else {
+        td.textContent = cell;
+      }
+      row.append(td);
+    }
+    tbody.append(row);
+  }
+  table.append(tbody);
+  return table;
+}
+
+function statusPara(kind, text) {
+  const para = document.createElement('p');
+  para.className = `status ${kind}`;
+  para.textContent = text;
+  return para;
 }
 
 $('loadConflicts').addEventListener('click', async () => {
   const res = await browser.runtime.sendMessage({ type: 'getConflicts', limit: 50 });
+  const box = $('conflictBox');
+  box.replaceChildren();
   if (!res?.ok) {
-    $('conflictBox').innerHTML = `<p class="status err">${escapeHtml(res?.error || 'Read failed')}</p>`;
+    box.append(statusPara('err', res?.error || 'Read failed'));
     return;
   }
   renderConflicts(res.conflicts || []);
@@ -153,27 +192,27 @@ $('loadConflicts').addEventListener('click', async () => {
 $('loadHistory').addEventListener('click', async () => {
   const res = await browser.runtime.sendMessage({ type: 'getHistory' });
   const box = $('historyBox');
+  box.replaceChildren();
   if (!res?.ok) {
-    box.innerHTML = `<p class="status err">${escapeHtml(res?.error || 'Read failed')}</p>`;
+    box.append(statusPara('err', res?.error || 'Read failed'));
     return;
   }
   const list = res.snapshots || [];
   if (!list.length) {
-    box.innerHTML = '<p class="status muted">No snapshots yet. The first successful sync creates one automatically.</p>';
+    box.append(statusPara('muted', 'No snapshots yet. The first successful sync creates one automatically.'));
     return;
   }
-  const rows = list
-    .map(
-      (snapshot) =>
-        `<tr><td>${new Date(snapshot.at).toLocaleString()}</td><td>${snapshot.items} items</td>
-         <td>${(snapshot.size / 1024).toFixed(1)} KB</td></tr>`,
-    )
-    .join('');
-  box.innerHTML = `<table>
-      <thead><tr><th>Time</th><th>Entries</th><th>Size</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    <p class="status muted">Rollback is manual, see docs/OPERATIONS.md.</p>`;
+  box.append(
+    buildTable(
+      ['Time', 'Entries', 'Size'],
+      list.map((snapshot) => [
+        new Date(snapshot.at).toLocaleString(),
+        `${snapshot.items} items`,
+        `${(snapshot.size / 1024).toFixed(1)} KB`,
+      ]),
+    ),
+  );
+  box.append(statusPara('muted', 'Rollback is manual, see docs/OPERATIONS.md.'));
 });
 
 $('reset').addEventListener('click', async () => {

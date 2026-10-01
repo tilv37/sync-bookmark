@@ -6,10 +6,13 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "bmsync@local",
-      "strict_min_version": "115.0",
+      "strict_min_version": "140.0",
       "data_collection_permissions": {
         "required": ["bookmarksInfo"]
       }
+    },
+    "gecko_android": {
+      "strict_min_version": "142.0"
     }
   },
   "permissions": ["bookmarks", "storage"],
@@ -20,11 +23,11 @@
   "action": {
     "default_title": "BM Sync",
     "default_popup": "popup/popup.html",
-    "default_icon": "icon.png"
+    "default_icon": "icon-48.png"
   },
   "icons": {
-    "48": "icon.png",
-    "96": "icon.png"
+    "48": "icon-48.png",
+    "96": "icon-96.png"
   },
   "options_ui": {
     "page": "options/options.html",
