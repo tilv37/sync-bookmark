@@ -7,19 +7,19 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BookmarkSync.Store.Tests;
 
 /// <summary>
-/// store 包的测试脚手架。
+/// Test scaffolding for the store package.
 /// </summary>
 /// <remarks>
-/// 与 BookmarkSync.Domain.Tests 下同名文件重复是有意的：C# 不支持跨项目共享
-/// 测试基类，而两边需要的 key 生成方式也不同（这里用 store 前缀，避免与
-/// 领域层用例混淆）。
+/// Duplicating the same-named file under BookmarkSync.Domain.Tests is deliberate: C# cannot share
+/// test base classes across projects, and the two sides need different key derivation (a store
+/// prefix here, to avoid confusion with domain-layer cases).
 /// </remarks>
 internal static class Fx
 {
     public const string DeviceA = "device-a";
     public const string DeviceB = "device-b";
 
-    /// <summary>固定墙钟基准，让涉及 x（删除时间）的断言确定。</summary>
+    /// <summary>Fixed wall-clock baseline so assertions involving x (deletion time) are deterministic.</summary>
     public const long T0 = 1_700_000_000_000L;
 
     public static string KeyOf(string label)
@@ -30,13 +30,13 @@ internal static class Fx
 
     public static Item ValidBookmark(string parent) => new()
     {
-        P = parent, T = ItemTypes.Bookmark, N = "标题", U = "https://example.com",
+        P = parent, T = ItemTypes.Bookmark, N = "Title", U = "https://example.com",
         M = Hlc.Encode(100, 0), A = Hlc.Encode(100, 0),
     };
 
     public static Item ValidFolder(string parent) => new()
     {
-        P = parent, T = ItemTypes.Folder, N = "目录",
+        P = parent, T = ItemTypes.Folder, N = "Folder",
         M = Hlc.Encode(100, 0), A = Hlc.Encode(100, 0),
     };
 
@@ -74,9 +74,9 @@ internal static class Fx
         string dir = dataDir
                      ?? Path.Combine(Path.GetTempPath(), "bmsync-test-" + Guid.NewGuid().ToString("N"));
 
-        // 必须先把目录建出来。Go 版靠 t.TempDir() 隐式建目录，C# 没有等价物 ——
-        // 忘了建的话，症状是 DirectoryNotFoundException 而不是"目录不存在"，
-        // 报错信息里没有任何一句提到真正的原因。
+        // The directory must be created first. Go relies on t.TempDir() creating it implicitly;
+        // C# has no equivalent — forgetting it surfaces as DirectoryNotFoundException instead of
+        // "directory missing", with nothing in the message pointing at the real cause.
         Directory.CreateDirectory(dir);
 
         return new StoreOptions
@@ -92,24 +92,23 @@ internal static class Fx
 }
 
 /// <summary>
-/// 持久化层的单元测试，逐条对应
-/// 持久化层的测试用例（同上）。
+/// Unit tests for the persistence layer, mirroring the persistence test cases.
 /// </summary>
 public class BookmarkStoreTests
 {
     [Fact]
-    public async Task 空目录下从空状态开始()
+    public async Task StartsEmptyInEmptyDirectory()
     {
         StoreOptions options = Fx.Options();
         using BookmarkStore store = await Fx.NewStoreAsync(options);
 
         Assert.Empty((await store.GetStateAsync()).Items);
         Assert.False(File.Exists(Path.Combine(options.DataDir, "state.json")),
-            "全新目录不应已有 state.json");
+            "a fresh directory must not already contain state.json");
     }
 
     [Fact]
-    public async Task 拒绝schema版本不符()
+    public async Task RejectsSchemaVersionMismatch()
     {
         StoreOptions options = Fx.Options();
         await File.WriteAllTextAsync(
@@ -120,9 +119,9 @@ public class BookmarkStoreTests
         Assert.Contains("schema", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>自动迁移看起来"方便"，但对不可再生的用户数据来说风险远大于收益。</summary>
+    /// <summary>Auto-migration looks "convenient", but for irreplaceable user data the risk far outweighs the benefit.</summary>
     [Fact]
-    public async Task 拒绝损坏文件()
+    public async Task RejectsCorruptFile()
     {
         StoreOptions options = Fx.Options();
         await File.WriteAllTextAsync(Path.Combine(options.DataDir, "state.json"), "{not json");
@@ -131,7 +130,7 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 恢复已保存的状态()
+    public async Task RestoresSavedState()
     {
         StoreOptions options = Fx.Options();
         State saved = Fx.StateOf(("b", Fx.ValidBookmark(RootFolders.Toolbar)));
@@ -144,7 +143,7 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 同步后落盘且可重新加载()
+    public async Task PersistsAfterSyncAndReloads()
     {
         StoreOptions options = Fx.Options();
         using BookmarkStore store = await Fx.NewStoreAsync(options);
@@ -155,12 +154,12 @@ public class BookmarkStoreTests
         var reloaded = JsonSerializer.Deserialize<State>(raw, BmsyncJson.Storage)!;
         Assert.Single(reloaded.Items);
 
-        // 临时文件不应残留
-        Assert.False(File.Exists(Path.Combine(options.DataDir, "state.json.tmp")), "临时文件未被清理");
+        // No temp file may be left behind
+        Assert.False(File.Exists(Path.Combine(options.DataDir, "state.json.tmp")), "temp file was not cleaned up");
     }
 
     [Fact]
-    public async Task 拒绝非法结果且不改动已落盘状态()
+    public async Task RejectsInvalidResultWithoutTouchingPersistedState()
     {
         StoreOptions options = Fx.Options();
         using BookmarkStore store = await Fx.NewStoreAsync(options);
@@ -169,7 +168,7 @@ public class BookmarkStoreTests
         string path = Path.Combine(options.DataDir, "state.json");
         string before = await File.ReadAllTextAsync(path);
 
-        // 一个 depth 超过上限的 state
+        // A state with depth over the limit
         State deep = State.New();
         string parent = RootFolders.Toolbar;
         for (int i = 0; i <= Limits.MaxDepth + 3; i++)
@@ -186,15 +185,15 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 同步前先建快照()
+    public async Task SnapshotsBeforeSync()
     {
         StoreOptions options = Fx.Options();
         using BookmarkStore store = await Fx.NewStoreAsync(options);
 
-        // 第一次同步：状态为空，不产生快照
+        // First sync: empty state, no snapshot produced
         await store.SyncAsync(Fx.StateOf(("b1", Fx.ValidBookmark(RootFolders.Toolbar))), null, Fx.DeviceA);
 
-        // 第二次同步：应产生一个"本次同步前"的快照
+        // Second sync: should produce one "pre-sync" snapshot
         await store.SyncAsync(Fx.StateOf(
             ("b1", Fx.ValidBookmark(RootFolders.Toolbar)),
             ("b2", Fx.ValidBookmark(RootFolders.Unfiled))), null, Fx.DeviceA);
@@ -202,7 +201,7 @@ public class BookmarkStoreTests
         IReadOnlyList<SnapshotInfo> snaps = await store.ListSnapshotsAsync();
         SnapshotInfo snap = Assert.Single(snaps);
 
-        // 快照内容应是"同步前"的状态：只有 b1，没有 b2
+        // Snapshot content should be the "pre-sync" state: b1 only, no b2
         string raw = await File.ReadAllTextAsync(
             Path.Combine(options.DataDir, "history", snap.Id + ".json"));
         var content = JsonSerializer.Deserialize<State>(raw, BmsyncJson.Storage)!;
@@ -212,7 +211,7 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 清理超出保留份数的旧快照()
+    public async Task PrunesSnapshotsBeyondRetention()
     {
         StoreOptions options = Fx.Options(); // HistoryKeep = 3
         using BookmarkStore store = await Fx.NewStoreAsync(options);
@@ -221,19 +220,19 @@ public class BookmarkStoreTests
         for (int i = 0; i < 8; i++)
         {
             await store.SyncAsync(baseline, null, Fx.DeviceA);
-            await Task.Delay(2); // 快照名是毫秒级时间戳
+            await Task.Delay(2); // Snapshot names are millisecond timestamps
         }
 
         int count = Directory.GetFiles(Path.Combine(options.DataDir, "history"), "*.json").Length;
-        Assert.True(count <= options.HistoryKeep, $"快照数 {count} 超过保留上限 {options.HistoryKeep}");
+        Assert.True(count <= options.HistoryKeep, $"snapshot count {count} exceeds retention {options.HistoryKeep}");
     }
 
     /// <summary>
-    /// 锁覆盖整个「读 → 合并 → 写」，所以并发同步不会丢更新。
-    /// 100 次并发写入后，100 个书签必须一个不少。
+    /// The lock covers the whole "read → merge → write", so concurrent syncs lose no updates.
+    /// After 100 concurrent writes, all 100 bookmarks must be present.
     /// </summary>
     [Fact]
-    public async Task 并发同步不丢更新()
+    public async Task ConcurrentSyncLosesNoUpdates()
     {
         StoreOptions options = Fx.Options();
         using BookmarkStore store = await Fx.NewStoreAsync(options);
@@ -266,14 +265,14 @@ public class BookmarkStoreTests
 
         Assert.Equal(n, await store.GetItemCountAsync());
 
-        // 落盘文件也必须完整
+        // The persisted file must be complete too
         string raw = await File.ReadAllTextAsync(Path.Combine(options.DataDir, "state.json"));
         var reloaded = JsonSerializer.Deserialize<State>(raw, BmsyncJson.Storage)!;
         Assert.Equal(n, reloaded.Items.Count);
     }
 
     [Fact]
-    public async Task 重复同步幂等()
+    public async Task RepeatedSyncIsIdempotent()
     {
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
         State incoming = Fx.StateOf(("b", Fx.ValidBookmark(RootFolders.Toolbar)));
@@ -282,13 +281,13 @@ public class BookmarkStoreTests
         for (int i = 0; i < 4; i++)
         {
             MergeResult again = await store.SyncAsync(incoming, null, Fx.DeviceA);
-            Assert.True(Fx.SameStates(first.State, again.State), $"第 {i + 1} 次重复同步结果不同");
+            Assert.True(Fx.SameStates(first.State, again.State), $"repeat sync #{i + 1} diverged");
             Assert.Equal(0, again.Summary.Created);
         }
     }
 
     [Fact]
-    public async Task 冲突环形缓冲()
+    public async Task ConflictRingBuffer()
     {
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
         Item orig = Fx.ValidBookmark(RootFolders.Toolbar);
@@ -297,23 +296,23 @@ public class BookmarkStoreTests
 
         await store.SyncAsync(Fx.StateOf(("b", orig)), baseMap, Fx.DeviceA);
 
-        // 制造多次真并发编辑。
+        // Produce several genuine concurrent edits.
         //
-        // 关键：光有"客户端改了"不算冲突 —— base 记录的是双方上次见到的样子，
-        // 只有当**两端都基于同一个基线改动了同一项**时才是并发编辑。
-        // 所以下面每轮都先让服务端侧也改一次。
+        // Key point: "the client changed it" alone is not a conflict — base records what both sides
+        // last saw, so only **both sides changing the same item off the same baseline** counts.
+        // Hence each round below changes the server side first.
         for (int round = 0; round < 10; round++)
         {
             Item serverSide = Fx.ValidBookmark(RootFolders.Toolbar) with
             {
-                N = "云端改" + round,
+                N = "Cloud edit " + round,
                 M = Hlc.Encode(2000 + (round * 2), 0),
             };
             await store.SyncAsync(Fx.StateOf(("b", serverSide)), baseMap, Fx.DeviceA);
 
             Item clientSide = Fx.ValidBookmark(RootFolders.Toolbar) with
             {
-                N = "本地改" + round,
+                N = "Local edit " + round,
                 M = Hlc.Encode(2001 + (round * 2), 0),
             };
 
@@ -321,30 +320,30 @@ public class BookmarkStoreTests
             await store.SyncAsync(Fx.StateOf(("b", clientSide)), baseMap, Fx.DeviceB);
 
             int after = (await store.GetConflictsAsync(0)).Count;
-            Assert.True(after > before, $"第 {round} 轮应记录冲突");
+            Assert.True(after > before, $"round {round} should record a conflict");
         }
 
         IReadOnlyList<Conflict> all = await store.GetConflictsAsync(0);
-        Assert.True(all.Count <= 500, $"冲突缓冲 {all.Count} 条，超过上限 500");
+        Assert.True(all.Count <= 500, $"conflict buffer holds {all.Count}, over the 500 cap");
         Assert.Equal(3, (await store.GetConflictsAsync(3)).Count);
     }
 
     [Fact]
-    public async Task 冲突缓冲重启后恢复()
+    public async Task ConflictBufferSurvivesRestart()
     {
         StoreOptions options = Fx.Options();
         using (BookmarkStore st = await Fx.NewStoreAsync(options))
         {
-            // 走一次真实同步制造冲突，比直接调内部方法更接近线上路径
+            // Produce the conflict via a real sync — closer to the live path than calling internals
             Item orig = Fx.ValidBookmark(RootFolders.Toolbar);
             string k = Fx.KeyOf("b");
             var baseMap = new Dictionary<string, string>(StringComparer.Ordinal) { [k] = orig.M };
             await st.SyncAsync(Fx.StateOf(("b", orig)), baseMap, Fx.DeviceA);
 
             await st.SyncAsync(
-                Fx.StateOf(("b", orig with { N = "云端", M = Hlc.Encode(300, 0) })), baseMap, Fx.DeviceA);
+                Fx.StateOf(("b", orig with { N = "Cloud", M = Hlc.Encode(300, 0) })), baseMap, Fx.DeviceA);
             await st.SyncAsync(
-                Fx.StateOf(("b", orig with { N = "本地", M = Hlc.Encode(200, 0) })), baseMap, Fx.DeviceB);
+                Fx.StateOf(("b", orig with { N = "Local", M = Hlc.Encode(200, 0) })), baseMap, Fx.DeviceB);
         }
 
         using BookmarkStore reopened = await Fx.NewStoreAsync(options);
@@ -352,7 +351,7 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task GetState返回深拷贝()
+    public async Task GetStateReturnsDeepCopy()
     {
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
         await store.SyncAsync(Fx.StateOf(("b", Fx.ValidBookmark(RootFolders.Toolbar))), null, Fx.DeviceA);
@@ -364,20 +363,20 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 空目录下快照列表为空()
+    public async Task EmptyDirectoryListsNoSnapshots()
     {
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
         Assert.Empty(await store.ListSnapshotsAsync());
     }
 
     [Fact]
-    public async Task ActiveCount只算活跃项()
+    public async Task ActiveCountCountsOnlyLiveItems()
     {
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
 
-        // 墓碑的 x 用**当前**时间：若用 Fx.T0（2023 年），它早于 90 天 TTL，
-        // 会在同一次 Sync 里被 GC 掉，测到的 ItemCount 就变成 1 ——
-        // 症状看起来像"合并丢了一项"，实际是测试数据过期了。
+        // The tombstone x uses the **current** time: with Fx.T0 (2023) it predates the 90-day TTL,
+        // would be GC-reaped in the same Sync, and the measured ItemCount would become 1 —
+        // looking like "merge dropped an item" when really the test data expired.
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         State incoming = Fx.StateOf(
@@ -391,9 +390,9 @@ public class BookmarkStoreTests
     }
 
     [Fact]
-    public async Task 过期墓碑被GC清理()
+    public async Task ExpiredTombstonesAreGcCollected()
     {
-        // 上一条的镜像：确认 GC 确实在工作，而不只是"因为数据没过期所以没删"。
+        // Mirror of the previous test: confirms GC really works, not just "nothing deleted because nothing expired".
         using BookmarkStore store = await Fx.NewStoreAsync(Fx.Options());
 
         long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();

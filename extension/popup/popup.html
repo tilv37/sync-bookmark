@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>BM Sync</title>
@@ -7,15 +7,15 @@
   </head>
   <body>
     <main>
-      <h1>BM Sync</h1>
-      <button id="sync" class="primary">立即同步</button>
+      <h1><img class="brand-icon" src="../icon.png" alt="" width="24" height="24" />BM Sync</h1>
+      <button id="sync" class="primary">Sync now</button>
 
-      <p id="status" class="muted">正在读取状态…</p>
-      <p id="last-sync" class="meta">上次同步：从未</p>
+      <p id="status" class="muted">Reading state…</p>
+      <p id="last-sync" class="meta">Last sync: never</p>
       <p id="cached" class="meta"></p>
 
       <p id="first-run" class="hint" hidden>
-        首次使用需要先配置服务器地址与访问令牌。
+        First run needs the server URL and access token configured.
       </p>
 
       <div id="notices" hidden>
@@ -26,8 +26,8 @@
     </main>
 
     <footer>
-      <button id="open-options" class="link">设置</button>
-      <button id="view-conflicts" class="link">冲突与历史</button>
+      <button id="open-options" class="link">Settings</button>
+      <button id="view-conflicts" class="link">Conflicts &amp; history</button>
     </footer>
 
     <script type="module" src="popup.js"></script>

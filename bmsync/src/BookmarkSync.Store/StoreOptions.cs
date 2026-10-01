@@ -3,30 +3,30 @@ using BookmarkSync.Domain;
 namespace BookmarkSync.Store;
 
 /// <summary>
-/// <see cref="BookmarkStore"/> 需要的配置。
+/// Configuration required by <see cref="BookmarkStore"/>.
 /// </summary>
 /// <remarks>
-/// 刻意<b>不复用</b> HTTP 层的 <c>ServerOptions</c>：持久化层不该依赖 HTTP 层，
-/// 那会让依赖方向反过来（Server → Store 才对）。而且 Store 其实只需要 3 个字段，
-/// 声明一个自己的最小配置更诚实 —— HTTP 那边多出来的 Token / Addr
-/// 对存储层毫无意义。
+/// Deliberately <b>not</b> reusing the HTTP-layer <c>ServerOptions</c>: the
+/// persistence layer must not depend on the HTTP layer (the arrow points
+/// Server → Store). Store needs only three fields; the extra Token / Addr on
+/// the HTTP side are meaningless here, so a minimal dedicated type is honest.
 /// </remarks>
 public sealed class StoreOptions
 {
-    /// <summary>state.json / conflicts.json / history/ 所在目录。</summary>
+    /// <summary>Directory holding state.json / conflicts.json / history/.</summary>
     public required string DataDir { get; init; }
 
-    /// <summary>保留的历史快照份数。</summary>
+    /// <summary>Number of history snapshots to keep.</summary>
     public int HistoryKeep { get; init; } = 30;
 
-    /// <summary>墓碑（已删除项）的保留时长，超期后由 GC 清理。</summary>
+    /// <summary>Tombstone retention; expired entries are removed by GC.</summary>
     public TimeSpan TombstoneTtl { get; init; } = TimeSpan.FromDays(90);
 }
 
-/// <summary>一个历史快照的元信息。</summary>
+/// <summary>Metadata for one history snapshot.</summary>
 /// <remarks>
-/// 放在 Store 而不是 HTTP 层：它描述的是"磁盘上那个文件是什么"，
-/// 属于存储层的事实。HTTP 层只是把它序列化出去。
+/// Lives in Store, not the HTTP layer: it describes "what that file on disk
+/// is", a storage-layer fact. HTTP only serializes it.
 /// </remarks>
 public sealed record SnapshotInfo
 {

@@ -1,34 +1,41 @@
-// jsonq —— JSON 取值工具，专为 test/smoke.sh 服务。
+// jsonq — JSON value helper serving test/smoke.sh.
 //
-// 为什么需要它：冒烟测试要读响应里的几个数字（item 数量、墓碑数量、
-// summary.created、冲突的某个字段），但测试机上不一定装了 jq 或 python。
-// Go 一定有 —— 服务端本身就是 Go 写的。
+// Why it exists: smoke tests read a few numbers from responses (item count,
+// tombstone count, summary.created, one conflict field), but the test machine
+// may have neither jq nor python. Go is the fallback that is usually around
+// for this repo's tooling.
 //
-// 用法：
+// NOTE: legacy Go helper, now optional. The server is C# (Kestrel); jsonq
+// stays Go only because it is a tiny standalone module. Prefer python3 or jq
+// when available — setup_json tries those first and only builds this when
+// neither exists.
+//
+// Usage:
 //   echo '{"a":{"b":[1,2]}}' | jsonq 'len(d["a"]["b"])'
 //   echo '[{"r":1},{"r":2}]' | jsonq 'last(d, "r")'
 //
-// ── 语法 ──────────────────────────────────────────────────────────────
+// ── Syntax ──────────────────────────────────────────────────────────
 //
-// 只支持下面这几个函数，刻意做得极窄：脚本里就用得上这几种。语法越窄，
-// 越不容易出现"看起来对其实没解析"的静默失败。
+// Only the functions below, deliberately narrow: the script needs just these.
+// Narrower syntax means fewer "looks right but silently unparsed" failures.
 //
-//	len(PATH)             数组 / 对象 / 字符串的长度
-//	get(PATH, "key")      取 PATH 对象的 key（缺失返回空串）
-//	count(PATH, "flag")   数一数 PATH 对象里有多少项的 flag 为真
-//	last(PATH, "key")     取 PATH **数组最后一个元素**的 key
-//	first(PATH, "key")    取 PATH 数组第一个元素的 key
-//	PATH                   直接取值
+//	len(PATH)             length of an array / object / string
+//	get(PATH, "key")      PATH object's key (empty string when missing)
+//	count(PATH, "flag")   items in PATH object with a truthy flag
+//	last(PATH, "key")     key of the **last element** of a PATH array
+//	first(PATH, "key")    key of the first element of a PATH array
+//	PATH                  direct value
 //
-// PATH 形如 d 或 d["state"]["items"]，d 表示根对象。
-// 数字去掉小数点，字符串原样输出，布尔输出 true/false。
-// 解析失败一律退出码 1 并把原因打到 stderr —— 调用方据此发现问题，
-// 而不是静默拿到空串后让断言假失败。
+// PATH looks like d or d["state"]["items"], d is the root object.
+// Numbers drop the decimal point, strings print raw, booleans print true/false.
+// Parse failures always exit 1 with the reason on stderr — callers notice,
+// instead of silently getting an empty string and failing a later assert.
 //
-// 注意 last/first 与 get 的区别：get 用于**对象**，last/first 用于
-// **数组**。冲突列表是数组，所以要 last(d["conflicts"], "reason")，
-// 不能 get(d["conflicts"], "reason") —— 那个会返回空串而不是报错，
-// 正是最容易被误判成"功能没实现"的那种失败。
+// Note the last/first vs get split: get is for **objects**, last/first for
+// **arrays**. The conflict list is an array, so read it with
+// last(d["conflicts"], "reason"), never get(d["conflicts"], "reason") — the
+// latter returns an empty string instead of an error, exactly the failure
+// most easily mistaken for "feature missing".
 package main
 
 import (
@@ -42,20 +49,20 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "用法: jsonq <表达式>   (JSON 从 stdin 读)")
+		fmt.Fprintln(os.Stderr, "usage: jsonq <expression>   (JSON read from stdin)")
 		os.Exit(2)
 	}
 	expr := os.Args[len(os.Args)-1]
 
 	raw, err := io.ReadAll(os.Stdin)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "jsonq: 读取 stdin 失败:", err)
+		fmt.Fprintln(os.Stderr, "jsonq: failed to read stdin:", err)
 		os.Exit(1)
 	}
 	var root any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		fmt.Fprintln(os.Stderr, "jsonq: JSON 解析失败:", err)
-		fmt.Fprintln(os.Stderr, "  输入前 200 字节:", truncate(string(raw), 200))
+		fmt.Fprintln(os.Stderr, "jsonq: JSON parse failed:", err)
+		fmt.Fprintln(os.Stderr, "  first 200 input bytes:", truncate(string(raw), 200))
 		os.Exit(1)
 	}
 
@@ -77,7 +84,7 @@ func truncate(s string, n int) string {
 func eval(expr string, root any) (string, error) {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
-		return "", fmt.Errorf("表达式为空")
+		return "", fmt.Errorf("empty expression")
 	}
 
 	// len(...)
@@ -101,7 +108,7 @@ func eval(expr string, root any) (string, error) {
 		}
 		obj, ok := v.(map[string]any)
 		if !ok {
-			return "", nil // 不是对象就当没有
+			return "", nil // non-object counts as missing
 		}
 		return render(obj[args[1]]), nil
 	}
@@ -125,7 +132,7 @@ func eval(expr string, root any) (string, error) {
 		return strconv.Itoa(n), nil
 	}
 
-	// last(PATH, "key") / first(PATH, "key") —— 取数组首/末元素的字段
+	// last(PATH, "key") / first(PATH, "key") — field of the last/first array element
 	for _, fn := range []string{"last", "first"} {
 		if args, ok := unwrapArgs(expr, fn, 2); ok {
 			v, err := resolvePath(args[0], root)
@@ -134,8 +141,9 @@ func eval(expr string, root any) (string, error) {
 			}
 			arr, ok := v.([]any)
 			if !ok || len(arr) == 0 {
-				// 空数组不是错误 —— 冒烟测试要区分"没有冲突"和"读取失败"，
-				// 所以这里安静地返回空串，由调用方的断言去判断。
+				// An empty array is not an error — smoke tests must tell
+				// "no conflicts" apart from "read failed", so return empty
+				// quietly and let the caller's assertion decide.
 				return "", nil
 			}
 			idx := len(arr) - 1
@@ -150,7 +158,7 @@ func eval(expr string, root any) (string, error) {
 		}
 	}
 
-	// 裸路径
+	// Bare path
 	v, err := resolvePath(expr, root)
 	if err != nil {
 		return "", err
@@ -158,21 +166,21 @@ func eval(expr string, root any) (string, error) {
 	return render(v), nil
 }
 
-// resolvePath 解析 d / d["a"]["b"] 形式的路径并返回值。
+// resolvePath resolves d / d["a"]["b"] style paths to values.
 func resolvePath(path string, root any) (any, error) {
 	path = strings.TrimSpace(path)
 	if !strings.HasPrefix(path, "d") {
-		return nil, fmt.Errorf("路径必须以 d 开头（d 表示根对象），得到 %q", path)
+		return nil, fmt.Errorf("path must start with d (d is the root object), got %q", path)
 	}
 	cur := root
 	for _, seg := range parsePath(path[1:]) {
 		obj, ok := cur.(map[string]any)
 		if !ok {
-			return nil, fmt.Errorf("在非对象上取 key %q —— 路径写法可能不对", seg)
+			return nil, fmt.Errorf("reading key %q from a non-object — path may be misspelled", seg)
 		}
 		next, exists := obj[seg]
 		if !exists {
-			return nil, fmt.Errorf("key %q 不存在", seg)
+			return nil, fmt.Errorf("key %q missing", seg)
 		}
 		cur = next
 	}
@@ -187,7 +195,7 @@ func unwrapCall(expr, name string) (string, bool) {
 	return strings.TrimSuffix(strings.TrimPrefix(expr, prefix), ")"), true
 }
 
-// unwrapArgs 解析 name(a, b) 形式的调用并切分参数（引号内的逗号不切）。
+// unwrapArgs parses name(a, b) calls, splitting args (commas inside quotes kept).
 func unwrapArgs(expr, name string, want int) ([]string, bool) {
 	inner, ok := unwrapCall(expr, name)
 	if !ok {
@@ -221,7 +229,7 @@ func unwrapArgs(expr, name string, want int) ([]string, bool) {
 	return args, true
 }
 
-// parsePath 解析 ["a"]["b"] 形式的下标链。
+// parsePath parses ["a"]["b"] style subscript chains.
 func parsePath(s string) []string {
 	var out []string
 	for i := 0; i < len(s); {
@@ -248,7 +256,7 @@ func lengthOf(v any) (int, error) {
 	case string:
 		return len(t), nil
 	}
-	return 0, fmt.Errorf("len() 不支持 %T", v)
+	return 0, fmt.Errorf("len() does not support %T", v)
 }
 
 func render(v any) string {

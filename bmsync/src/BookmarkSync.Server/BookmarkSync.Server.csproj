@@ -1,20 +1,20 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
 
   <!--
-    HTTP 层：路由、鉴权、限流、请求/响应编解码。
+    HTTP layer: routing, auth, rate limiting, request/response codec.
 
-    用 ASP.NET Core Minimal API 而不是 MVC / 控制器：这里没有视图、
-    没有模型绑定、没有内容协商需求，多一层抽象只会让"这个端点到底
-    校验了什么"变得需要跳转才能回答。四个端点短到可以一眼读完。
+    Uses ASP.NET Core Minimal API instead of MVC / controllers: no views,
+    no model binding, no content-negotiation needs here; one more abstraction layer would only make
+    "what exactly does this endpoint validate" require jumping around to answer. Four endpoints, short enough to read at a glance.
 
-    它是唯一持有"信任边界"的项目（Authentication.cs），所以那个文件的
-    每一次改动都应该是有意识的决定，而不是顺手重构。
+    It is the only project holding the trust boundary (Authentication.cs), so every change to that file
+    should be a deliberate decision, not a drive-by refactor.
   -->
 
   <PropertyGroup>
     <!--
-      Web SDK 的默认输出类型是 Exe，但这个项目是库：真正的入口在
-      BookmarkSync.Cli。沿用默认值会得到 CS5001（找不到 Main）。
+      The Web SDK defaults OutputType to Exe, but this project is a library: the real entry point lives in
+      BookmarkSync.Cli. Keeping the default yields CS5001 (no Main found).
     -->
     <OutputType>Library</OutputType>
     <RootNamespace>BookmarkSync.Server</RootNamespace>
@@ -31,9 +31,9 @@
   </ItemGroup>
 
   <!--
-    不写 <FrameworkReference Include="Microsoft.AspNetCore.App" />：
-    Web SDK 已经隐式引用它，显式再写一次会触发 NETSDK1086 警告，
-    而本解决方案 TreatWarningsAsErrors=true，那会让构建直接失败。
+    No <FrameworkReference Include="Microsoft.AspNetCore.App" />:
+    the Web SDK already references it implicitly; writing it again explicitly triggers a NETSDK1086 warning,
+    and since this solution sets TreatWarningsAsErrors=true, that would fail the build directly.
   -->
 
 </Project>

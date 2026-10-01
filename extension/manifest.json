@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BM Sync",
   "version": "0.1.0",
-  "description": "手动触发的书签双向同步工具：书签树全量上报到自建服务端合并，支持删除传播。",
+  "description": "Manually triggered two-way bookmark sync: full bookmark-tree upload merged on a self-hosted server, with delete propagation.",
   "browser_specific_settings": {
     "gecko": {
       "id": "bmsync@local",
@@ -16,7 +16,12 @@
   },
   "action": {
     "default_title": "BM Sync",
-    "default_popup": "popup/popup.html"
+    "default_popup": "popup/popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "48": "icon.png",
+    "96": "icon.png"
   },
   "options_ui": {
     "page": "options/options.html",

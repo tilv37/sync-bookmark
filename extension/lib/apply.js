@@ -1,48 +1,52 @@
-// extension/lib/apply.js —— 应用：同步 state → Firefox 书签树
+// extension/lib/apply.js — apply: sync state -> Firefox bookmark tree
 //
-// 与 collect 对称。同样是依赖注入，不直接引用 browser.*。
+// Mirror image of collect. Also dependency-injected, never touches browser.*.
 //
-// ── 三条顺序约束（违反其中任何一条都会出错）───────────────────────────
+// ── Three ordering constraints (breaking any one of them fails) ─────────
+//  1. **Delete before create**. Creating first makes a "locally present but
+//     remotely deleted" item look "already there" and skipped, so the
+//     deletion never propagates.
+//  2. **Delete only the top level**. bookmarks.remove on a folder is
+//     recursive; children disappear with it, and a second remove on a child
+//     fails because the node is already gone.
+//  3. **Create in ascending depth**. A parent folder must land first, or
+//     create's parentId is invalid. Same for move — it may target a
+//     not-yet-created directory.
 //
-//  1. **先删后建**。如果先创建，某个"本地有、云端已删"的项会被误判为
-//     "已存在"而跳过，删除就永远同步不过来。
-//  2. **删除只处理最上层**。Firefox 的 bookmarks.remove 对文件夹是递归的，
-//     子项会跟着消失；对子项再发一次 remove 会因为节点已不存在而报错。
-//  3. **按深度升序创建**。父文件夹必须先落地，否则 create 的 parentId 无效。
-//     move 同理 —— 可能把项挂到一个尚未创建的目录下。
-//
-// ── 不做回滚 ──────────────────────────────────────────────────────────
-//
-// 中途失败时**不回滚**。理由见 design.md §9.6：Firefox 书签树没有事务，
-// 实现反向回滚的复杂度远超收益；而 LWW 合并的方向性保证「重试只会更接近
-// 正确状态，不会造成破坏」。改为记录已应用的部分并在 UI 上提示重试。
+// ── No rollback ───────────────────────────────────────────────────────
+// On mid-flight failure, **do not roll back**. Rationale in docs/architecture.md §4:
+// the Firefox bookmark tree has no transactions, and reverse-rolling every
+// step costs far more than it saves; LWW merge directionality guarantees
+// "retry only gets closer to the correct state, never destroys". Instead,
+// record the applied part and prompt for retry in the UI.
 
 import { TYPE_FOLDER, isRootFolder } from './keys.js';
 
 /**
- * 计算应用计划。
+ * Compute an apply plan.
  *
- * 拆成"算计划"和"执行计划"两步，是为了让顺序约束可以被单元测试直接断言，
- * 而不必真的去改一棵 mock 树。
+ * Split into "plan" and "execute" so the ordering constraints can be
+ * asserted directly by unit tests without touching a real (or mock) tree.
  *
- * @param {Map<string,object>} liveNodes   scan() 的结果：当前本地状态
- * @param {object} incomingState          服务端返回的权威 state
- * @param {Map<string,string>} ffKeyToId   key → Firefox 本地 id
+ * @param {Map<string,object>} liveNodes   scan() result: current local state
+ * @param {object} incomingState          Authoritative state from the server
+ * @param {Map<string,string>} firefoxIdBySyncKey   key -> Firefox local id
  * @returns {{removes: object[], upserts: object[], skipped: object[], counts: object}}
  */
-export function planApply(liveNodes, incomingState, ffKeyToId) {
+export function planApply(liveNodes, incomingState, firefoxIdBySyncKey) {
   const incoming = (incomingState && incomingState.items) || {};
 
-  // desired：服务端状态里所有**存活**的项
+  // desired: every **live** item in the server state
   const desired = new Map();
   for (const [key, item] of Object.entries(incoming)) {
-    if (item && item.d) continue; // 墓碑不需要落地
+    if (item && item.d) continue; // tombstones never land
     desired.set(key, item);
   }
 
-  // ── 删除阶段 ──────────────────────────────────────────────────
-  // 找出「本地有、云端没有」的 key。取其中**父级也不在删除集合里**的那些
-  // —— 它们就是删除子树的最上层，递归 remove 会连带清掉子孙。
+  // ── Delete phase ──────────────────────────────────────────────
+  // Find keys "locally present, remotely absent". Keep only those whose
+  // parent is NOT also in the delete set — they are the tops of deleted
+  // subtrees, and recursive remove clears the descendants with them.
   const toDelete = new Set();
   for (const key of liveNodes.keys()) {
     if (!desired.has(key)) toDelete.add(key);
@@ -51,22 +55,22 @@ export function planApply(liveNodes, incomingState, ffKeyToId) {
   const removes = [];
   for (const key of toDelete) {
     const parentKey = liveNodes.get(key).parentKey;
-    if (parentKey && toDelete.has(parentKey)) continue; // 父级也要删，交给它
-    const ffId = ffKeyToId.get(key);
-    if (ffId === undefined) continue; // 节点已经不在了
-    removes.push({ key, ffId, type: liveNodes.get(key).type });
+    if (parentKey && toDelete.has(parentKey)) continue; // parent covers it
+    const firefoxLocalId = firefoxIdBySyncKey.get(key);
+    if (firefoxLocalId === undefined) continue; // node already gone
+    removes.push({ key, firefoxLocalId, type: liveNodes.get(key).type });
   }
 
-  // ── 创建 / 更新阶段 ───────────────────────────────────────────
-  // 计算每个待落地项的深度，用于排序。深度由「顺着 parentKey 一路上溯」
-  // 得到；父链断裂的项无法计算深度，记入 skipped。
+  // ── Create / update phase ─────────────────────────────────────
+  // Depth of each item to land, for sorting. Depth walks up the parentKey
+  // chain; items with a broken parent chain cannot be placed and go to skipped.
   const depthOf = (key, seen = new Set()) => {
-    if (seen.has(key)) return -1; // 环
+    if (seen.has(key)) return -1; // cycle
     seen.add(key);
     const item = desired.get(key);
     if (!item) return -1;
     if (isRootFolder(item.p)) return 1;
-    if (!desired.has(item.p)) return -1; // 父级不在云端状态里
+    if (!desired.has(item.p)) return -1; // parent missing from cloud state
     const parentDepth = depthOf(item.p, seen);
     return parentDepth < 0 ? -1 : parentDepth + 1;
   };
@@ -76,167 +80,176 @@ export function planApply(liveNodes, incomingState, ffKeyToId) {
   for (const [key, want] of desired) {
     const depth = depthOf(key);
     if (depth < 0) {
-      // 父级缺失或成环。**不能凭空放到根目录** —— 那会把用户的书签
-      // 悄悄挪到"其他书签"下面，比跳过更糟。
+      // Missing parent or cycle. **Never park it at the root** — silently
+      // moving a user's bookmark under "Other Bookmarks" is worse than skipping.
       skipped.push({ key, reason: 'parent-missing', want });
       continue;
     }
 
     const live = liveNodes.get(key);
     if (live) {
-      const op = { key, depth, ffId: live.ffId, want, live };
-      op.titleChanged = live.title !== (want.n || '');
-      op.urlChanged = live.url !== (want.u || '');
-      op.parentChanged = (live.parentKey || '') !== (want.p || '');
-      op.typeChanged = live.type !== want.t;
-      if (op.titleChanged || op.urlChanged || op.parentChanged || op.typeChanged) {
-        upserts.push(op);
+      const upsertOp = { key, depth, firefoxLocalId: live.firefoxLocalId, want, live };
+      upsertOp.titleChanged = live.title !== (want.n || '');
+      upsertOp.urlChanged = live.url !== (want.u || '');
+      upsertOp.parentChanged = (live.parentKey || '') !== (want.p || '');
+      upsertOp.typeChanged = live.type !== want.t;
+      if (upsertOp.titleChanged || upsertOp.urlChanged || upsertOp.parentChanged || upsertOp.typeChanged) {
+        upserts.push(upsertOp);
       }
       continue;
     }
-    upserts.push({ key, depth, ffId: null, want, live: null, isCreate: true });
+    upserts.push({ key, depth, firefoxLocalId: null, want, live: null, isCreate: true });
   }
 
-  // 深度升序；同深度按 key 排序保证确定性
-  upserts.sort((a, b) => a.depth - b.depth || (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+  // Ascending depth; same depth sorted by key for determinism
+  upserts.sort((left, right) => left.depth - right.depth || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0));
 
   return {
     removes,
     upserts,
     skipped,
-    // ffIdByKey 是**本地已存在**的 key → Firefox id 全表。
+    // firefoxIdBySyncKey is the full key -> Firefox id table of **already
+    // existing local** nodes.
     //
-    // 为什么必须单独传：upserts 里只有"需要改动的项"，
-    // 而把书签移到一个"本地已有、但本次不需要变动"的目录时，
-    // 那个目录根本不在 upserts 里。执行阶段若无从查起就会报
-    // "父目录不存在"，结果是 move 静默失败 —— 书签留在原处，
-    // 而 sync 报告一切正常。
+    // Why it must be passed separately: upserts only holds "items needing a
+    // change", but moving a bookmark into a "locally present yet unchanged"
+    // directory references a directory that is not in upserts at all. With
+    // nowhere to look it up, execution reports "parent missing" and the move
+    // silently fails — the bookmark stays put while sync reports success.
     //
-    // 这个 bug 是靠 apply.test.js 的"父目录变了 → move"用例抓到的。
-    ffIdByKey: new Map([...liveNodes].map(([key, n]) => [key, n.ffId]).filter(([, id]) => id)),
+    // This bug was caught by apply.test.js's "parent changed -> move" case.
+    firefoxIdBySyncKey: new Map([...liveNodes].map(([key, node]) => [key, node.firefoxLocalId]).filter(([, id]) => id)),
     counts: {
       remove: removes.length,
-      create: upserts.filter((u) => u.isCreate).length,
-      update: upserts.filter((u) => !u.isCreate).length,
-      moved: upserts.filter((u) => !u.isCreate && u.parentChanged).length,
+      create: upserts.filter((upsertOp) => upsertOp.isCreate).length,
+      update: upserts.filter((upsertOp) => !upsertOp.isCreate).length,
+      moved: upserts.filter((upsertOp) => !upsertOp.isCreate && upsertOp.parentChanged).length,
       skipped: skipped.length,
     },
   };
 }
 
 /**
- * 执行应用计划。
+ * Execute an apply plan.
  *
- * @param {object} api browser.bookmarks 的替身
- * @param {object} plan planApply() 的返回值
+ * @param {object} api browser.bookmarks stand-in
+ * @param {object} plan planApply() return value
  * @param {object} [opts]
- * @param {(msg: string) => void} [opts.onProgress] 长任务进度回调
+ * @param {(msg: string) => void} [opts.onProgress] Progress callback for long tasks
  * @returns {Promise<{created:number, updated:number, moved:number, deleted:number, failed:object[]}>}
  */
 export async function executePlan(api, plan, opts = {}) {
   const { onProgress } = opts;
   const result = { created: 0, updated: 0, moved: 0, deleted: 0, failed: [] };
 
-  // ── 阶段 1：删除 ───────────────────────────────────────────────
-  for (const r of plan.removes) {
+  // ── Phase 1: deletes ──────────────────────────────────────────
+  for (const removeOp of plan.removes) {
     try {
-      await api.remove(r.ffId);
+      await api.remove(removeOp.firefoxLocalId);
       result.deleted += 1;
     } catch (err) {
-      // 节点可能已被用户手动删掉。这不算失败。
+      // The node may already have been deleted by the user. Not a failure.
       if (!isNotFound(err)) {
-        result.failed.push({ op: 'remove', key: r.key, error: String(err) });
+        result.failed.push({ op: 'remove', key: removeOp.key, error: String(err) });
       }
     }
   }
-  onProgress?.(`已删除 ${result.deleted} 项`);
+  onProgress?.(`Deleted ${result.deleted} items`);
 
-  // ── 阶段 2：创建 / 更新 ───────────────────────────────────────
+  // ── Phase 2: creates / updates ────────────────────────────────
   //
-  // depth 升序已保证父目录先于子项存在。这里还要处理一种情况：目标父目录
-  // 在本地不存在（服务端有但本地的父文件夹被排除了）。这时 create 会失败，
-  // 记入 failed 而不是丢到根目录 —— 静默挪位置比报错更难排查。
-  // 已存在节点的 id 全表（planApply 提供），再叠加本次新建出来的。
-  // 顺序很重要：新建的父目录要在它的子项之前被建好，所以这里
-  // 随执行过程不断补充。
-  const liveIds = new Map(plan.ffIdByKey || []);
-  for (const u of plan.upserts) {
-    if (u.ffId && !liveIds.has(u.key)) liveIds.set(u.key, u.ffId);
+  // Ascending depth already guarantees parents exist before children. One more
+  // case: the target parent may not exist locally (on the server, but its
+  // local folder is excluded). Then create fails — recorded in failed, never
+  // silently parked at the root, which is harder to debug than an error.
+  // Full id table of existing nodes (from planApply), plus whatever this run
+  // creates. Order matters: freshly created parents must be visible before
+  // their children, so the table grows as execution proceeds.
+  const liveIds = new Map(plan.firefoxIdBySyncKey || []);
+  // Back-compat: older plans used ffIdByKey.
+  if (plan.ffIdByKey) {
+    for (const [key, id] of plan.ffIdByKey) {
+      if (!liveIds.has(key)) liveIds.set(key, id);
+    }
+  }
+  for (const upsertOp of plan.upserts) {
+    if (upsertOp.firefoxLocalId && !liveIds.has(upsertOp.key)) liveIds.set(upsertOp.key, upsertOp.firefoxLocalId);
   }
 
-  for (const u of plan.upserts) {
+  for (const upsertOp of plan.upserts) {
     try {
-      if (u.isCreate) {
-        const parentId = resolveParentId(api, u, liveIds);
+      if (upsertOp.isCreate) {
+        const parentId = resolveParentId(api, upsertOp, liveIds);
         if (parentId === null) {
-          result.failed.push({ op: 'create', key: u.key, error: '父目录不存在' });
+          result.failed.push({ op: 'create', key: upsertOp.key, error: 'parent folder missing' });
           continue;
         }
         const node = await api.create({
           parentId,
-          title: u.want.n || '',
-          ...(u.want.t === TYPE_FOLDER ? {} : { url: u.want.u || '' }),
+          title: upsertOp.want.n || '',
+          ...(upsertOp.want.t === TYPE_FOLDER ? {} : { url: upsertOp.want.u || '' }),
         });
-        liveIds.set(u.key, node.id);
+        liveIds.set(upsertOp.key, node.id);
         result.created += 1;
         continue;
       }
 
-      // 更新：先 move 再改属性。顺序反了会导致 update 打在旧位置上。
-      if (u.parentChanged) {
-        const parentId = resolveParentId(api, u, liveIds);
+      // Update: move first, then change attributes. Reversed, the update lands on the old position.
+      if (upsertOp.parentChanged) {
+        const parentId = resolveParentId(api, upsertOp, liveIds);
         if (parentId === null) {
-          result.failed.push({ op: 'move', key: u.key, error: '父目录不存在' });
+          result.failed.push({ op: 'move', key: upsertOp.key, error: 'parent folder missing' });
           continue;
         }
-        await api.move(u.ffId, { parentId });
+        await api.move(upsertOp.firefoxLocalId, { parentId });
         result.moved += 1;
       }
-      // 类型变了（书签 ↔ 文件夹）只能删了重建：bookmarks.update 不支持改类型。
-      if (u.typeChanged) {
-        await api.remove(u.ffId);
-        const parentId = resolveParentId(api, u, liveIds);
+      // Type changed (bookmark <-> folder) can only be delete + recreate:
+      // bookmarks.update cannot change the type.
+      if (upsertOp.typeChanged) {
+        await api.remove(upsertOp.firefoxLocalId);
+        const parentId = resolveParentId(api, upsertOp, liveIds);
         if (parentId === null) {
-          result.failed.push({ op: 'recreate', key: u.key, error: '父目录不存在' });
+          result.failed.push({ op: 'recreate', key: upsertOp.key, error: 'parent folder missing' });
           continue;
         }
         const node = await api.create({
           parentId,
-          title: u.want.n || '',
-          ...(u.want.t === TYPE_FOLDER ? {} : { url: u.want.u || '' }),
+          title: upsertOp.want.n || '',
+          ...(upsertOp.want.t === TYPE_FOLDER ? {} : { url: upsertOp.want.u || '' }),
         });
-        liveIds.set(u.key, node.id);
+        liveIds.set(upsertOp.key, node.id);
         result.created += 1;
         continue;
       }
-      if (u.titleChanged || u.urlChanged) {
-        await api.update(u.ffId, {
-          ...(u.titleChanged ? { title: u.want.n || '' } : {}),
-          ...(u.urlChanged && u.want.u ? { url: u.want.u } : {}),
+      if (upsertOp.titleChanged || upsertOp.urlChanged) {
+        await api.update(upsertOp.firefoxLocalId, {
+          ...(upsertOp.titleChanged ? { title: upsertOp.want.n || '' } : {}),
+          ...(upsertOp.urlChanged && upsertOp.want.u ? { url: upsertOp.want.u } : {}),
         });
         result.updated += 1;
       }
     } catch (err) {
       if (!isNotFound(err)) {
-        result.failed.push({ op: 'update', key: u.key, error: String(err) });
+        result.failed.push({ op: 'update', key: upsertOp.key, error: String(err) });
       }
     }
   }
-  onProgress?.(`已创建 ${result.created}、更新 ${result.updated}、移动 ${result.moved} 项`);
+  onProgress?.(`Created ${result.created}, updated ${result.updated}, moved ${result.moved}`);
 
   return result;
 }
 
 /**
- * 解析父目录的 Firefox id。
+ * Resolve the Firefox id of a parent folder.
  *
- * 顶层项的父级是四个根目录之一 —— 它们本身不在 desired 里，但它们的
- * Firefox id 是**固定字面量**，可以直接用。
+ * Top-level items parent to one of the four roots — not items themselves,
+ * but their Firefox ids are **fixed literals** usable directly.
  */
-function resolveParentId(api, u, liveIds) {
-  const parentKey = u.want.p;
-  // 顶层项的父级是四个根目录之一 —— 它们不是 item，但 Firefox id
-  // 是**固定字面量**，可以直接用。
+function resolveParentId(api, upsertOp, liveIds) {
+  const parentKey = upsertOp.want.p;
+  // Top-level parents are the four roots — not items, but their Firefox ids
+  // are **fixed literals**, usable directly.
   if (isRootFolder(parentKey)) return parentKey;
   const id = liveIds.get(parentKey);
   return id === undefined ? null : id;
@@ -244,5 +257,6 @@ function resolveParentId(api, u, liveIds) {
 
 function isNotFound(err) {
   const msg = String(err && err.message ? err.message : err).toLowerCase();
+  // Match English and Chinese Firefox locales ('不存在' = 'not found' in zh-CN errors).
   return msg.includes('no bookmark') || msg.includes('not found') || msg.includes('不存在');
 }

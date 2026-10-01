@@ -1,24 +1,24 @@
-' bmsync —— C4 Level 1：系统上下文
-' 只生产 .puml，不渲染。改动时同步 docs/design.md 对应章节。
-' 渲染需要 C4-PlantUML：https://github.com/plantuml-stdlib/C4-PlantUML
+' bmsync — C4 Level 1: system context
+' Only produces .puml, no rendering. Keep the matching docs/design.md section in sync when changing.
+' Rendering needs C4-PlantUML: https://github.com/plantuml-stdlib/C4-PlantUML
 
 @startuml c4-context
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Context.puml
 
-title bmsync 系统上下文（C4 Level 1）
+title bmsync system context (C4 Level 1)
 
-Person(personal, "个人 PC", "Firefox + BM Sync 扩展")
-Person(company, "公司 PC", "Firefox + BM Sync 扩展，不能登录个人账号")
+Person(personal, "Personal PC", "Firefox + BM Sync extension")
+Person(company, "Work PC", "Firefox + BM Sync extension, cannot log into personal accounts")
 
-System(bmsync, "bmsync", "自建书签同步服务端：手动触发的双向合并（LWW + HLC），删除可同步")
-System_Ext(npm, "Nginx Proxy Manager", "用户已有的反代：TLS 终结、client_max_body_size 32m")
-System_Ext(vps, "VPS", "Docker 宿主机，bmsync 只绑 127.0.0.1:8080")
+System(bmsync, "bmsync", "Self-hosted bookmark sync server: manually triggered two-way merge (LWW + HLC), deletions sync")
+System_Ext(npm, "Nginx Proxy Manager", "Existing reverse proxy: TLS termination, client_max_body_size 32m")
+System_Ext(vps, "VPS", "Docker host, bmsync binds only 127.0.0.1:8080")
 
-Rel(personal, bmsync, "同步书签树", "HTTPS（经 NPM）")
-Rel(company, bmsync, "同步书签树", "HTTPS（经 NPM）")
-Rel(bmsync, npm, "明文 HTTP", "127.0.0.1:8080")
-Rel(npm, vps, "部署在", "")
-Rel(bmsync, vps, "运行在", "Docker，FROM scratch")
+Rel(personal, bmsync, "Sync bookmark tree", "HTTPS (via NPM)")
+Rel(company, bmsync, "Sync bookmark tree", "HTTPS (via NPM)")
+Rel(bmsync, npm, "Plain HTTP", "127.0.0.1:8080")
+Rel(npm, vps, "Deployed on", "")
+Rel(bmsync, vps, "Runs on", "Docker, FROM scratch")
 
-' 最大未知数（HANDOVER §5.4）：公司网络若拦截自建域名，左侧链路整体不可用
+' Biggest unknown (HANDOVER §5.4): if the corporate network blocks the self-hosted domain, the whole left-side link is unusable
 @enduml

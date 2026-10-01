@@ -5,20 +5,20 @@ using BookmarkSync.Domain;
 namespace BookmarkSync.Server.Tests;
 
 /// <summary>
-/// API 端点测试，对应 HTTP 端点的测试用例（同上）。
+/// API endpoint tests, mirroring the HTTP endpoint test cases.
 /// </summary>
 /// <remarks>
-/// 全部走真实管道（TestServer），不是单独调处理器 —— 理由见
-/// <see cref="ServerFixture"/> 的说明。
+/// All go through the real pipeline, never handlers in isolation — see
+/// <see cref="ServerFixture"/> for why.
 /// </remarks>
 public class ApiEndpointTests
 {
     [Fact]
-    public async Task health免鉴权()
+    public async Task HealthSkipsAuth()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
-        // options 页的"测试连接"要在用户填完令牌前就能确认服务活着
+        // The options page "test connection" must confirm liveness before the token is entered
         (HttpStatusCode status, string body) = await f.GetAsync("/api/health", withToken: false);
 
         Assert.Equal(HttpStatusCode.OK, status);
@@ -30,21 +30,21 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task health响应ContentType带charset()
+    public async Task HealthResponseContentTypeIncludesCharset()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
         using HttpRequestMessage req = f.Request(HttpMethod.Get, "/api/health", withToken: false);
         using HttpResponseMessage resp = await f.Client.SendAsync(req);
 
-        // 扩展是按 response.json() 读的，charset 消失会给出
-        // "Unexpected token" 这种指向错误方向的报错
+        // The extension reads via response.json(); a missing charset fails with a misleading
+        // "Unexpected token" error
         Assert.Equal("application/json", resp.Content.Headers.ContentType?.MediaType);
         Assert.Equal("utf-8", resp.Content.Headers.ContentType?.CharSet);
     }
 
     [Fact]
-    public async Task sync需要有效token()
+    public async Task SyncRequiresValidToken()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
         SyncRequest good = Fx.SyncBody(Fx.Items((Fx.Key1, Fx.Bookmark(RootFolders.Toolbar, "t", "https://x.example"))));
@@ -61,16 +61,16 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task bearer前缀大小写不敏感()
+    public async Task BearerPrefixIsCaseInsensitive()
     {
-        // RFC 7235 的 scheme 是 case-insensitive。有些 HTTP 客户端会小写
+        // RFC 7235 schemes are case-insensitive. Some HTTP clients lowercase it
         await using ServerFixture f = await ServerFixture.StartAsync();
         SyncRequest body = Fx.SyncBody(Fx.Items((Fx.Key1, Fx.Bookmark(RootFolders.Toolbar, "t", "https://x.example"))));
 
         using HttpRequestMessage req = new(HttpMethod.Post, "/api/sync")
         {
-            // ApiJson.Response：SyncRequest 是 Server 的类型，BmsyncJson 挂的
-            // DomainJsonContext 不认它（详见 Fx.SyncBody 的注释）
+            // ApiJson.Response: SyncRequest is a Server type that DomainJsonContext behind BmsyncJson
+            // does not know (see the Fx.SyncBody note)
             Content = new StringContent(
                 JsonSerializer.Serialize(body, ApiJson.Response),
                 System.Text.Encoding.UTF8, "application/json"),
@@ -82,7 +82,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task sync接受并返回状态()
+    public async Task SyncAcceptsAndReturnsState()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -96,40 +96,40 @@ public class ApiEndpointTests
         using JsonDocument doc = JsonDocument.Parse(raw);
         JsonElement items = doc.RootElement.GetProperty("state").GetProperty("items");
 
-        // 两个 item 都要在，且 key 就是我们上传的那两个。
-        // 不写成 "items.GetProperty(Key1).ValueKind == Object ? Count() : 0" 这种
-        // 内联三元 —— 它在 key 缺失时会静默返回 0，于是断言失败的原因是
-        // "期望 0 实际 0" 这种自相矛盾的东西，排查要多绕一圈。
+        // Both items must be present under exactly the uploaded keys.
+        // Not written as an inline ternary like "items.GetProperty(Key1).ValueKind == Object ? Count() : 0"
+        // — that silently yields 0 on a missing key, so the failure reads as the self-contradictory
+        // "expected 0, actual 0" and costs an extra triage lap.
         Assert.Equal(2, items.EnumerateObject().Count());
         Assert.Equal(JsonValueKind.Object, items.GetProperty(Fx.Key1).ValueKind);
         Assert.Equal(JsonValueKind.Object, items.GetProperty(Fx.Key2).ValueKind);
 
-        // 目录没有 url 字段（Go omitempty 的等价行为）
+        // Folders carry no url field (Go omitempty equivalent)
         Assert.False(items.GetProperty(Fx.Key1).TryGetProperty("u", out _));
 
         JsonElement summary = doc.RootElement.GetProperty("summary");
         Assert.Equal(2, summary.GetProperty("created").GetInt32());
 
-        // 冲突数在**响应顶层**（conflicts 数组 + total），不在 summary 里。
-        // Go 版 Summary 结构体只有 created/updated/deleted/unchanged 四项。
-        // 早先在这里断言 summary.conflicts 是我记错了字段位置 ——
-        // 症状是 KeyNotFoundException，完全看不出"是字段位置记错了"。
+        // Conflict counts live at the **response top level** (conflicts array + total), not in summary.
+        // The Go Summary struct has only created/updated/deleted/unchanged.
+        // Asserting summary.conflicts here was my earlier field-position mistake —
+        // surfacing as KeyNotFoundException with no hint that the field position was wrong.
         Assert.Empty(doc.RootElement.GetProperty("conflicts").EnumerateArray());
     }
 
     [Fact]
-    public async Task sync拒绝空请求体()
+    public async Task SyncRejectsEmptyBody()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
         (HttpStatusCode status, string body) = await f.PostSyncAsync(null, rawBody: "");
 
         Assert.Equal(HttpStatusCode.BadRequest, status);
-        Assert.Contains("请求体为空", body, StringComparison.Ordinal);
+        Assert.Contains("Request body is empty", body, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task sync拒绝畸形JSON()
+    public async Task SyncRejectsMalformedJson()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -140,10 +140,10 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task sync拒绝未知字段()
+    public async Task SyncRejectsUnknownFields()
     {
-        // 字段名拼错的客户端应该立刻拿到明确错误，而不是静默忽略后行为诡异
-        // （比如把 device 拼成 devcie，服务端一直当默认设备处理，没人想到是拼写问题）
+        // A client with a misspelled field must get a clear error at once, not silent misbehavior
+        // (e.g. device typed as devcie, forever treated as the default device with nobody suspecting a typo)
         await using ServerFixture f = await ServerFixture.StartAsync();
 
         (HttpStatusCode status, string body) = await f.PostSyncAsync(
@@ -154,9 +154,9 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task sync拒绝尾随内容()
+    public async Task SyncRejectsTrailingContent()
     {
-        // 拒绝第二个 JSON 值：通常是客户端 bug，也可能是攻击试探
+        // Reject a second JSON value: usually a client bug, possibly an attack probe
         await using ServerFixture f = await ServerFixture.StartAsync();
 
         (HttpStatusCode status, _) = await f.PostSyncAsync(
@@ -166,7 +166,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task sync拒绝schema版本不符()
+    public async Task SyncRejectsSchemaVersionMismatch()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -178,17 +178,17 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task sync拒绝非法item()
+    public async Task SyncRejectsInvalidItem()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
-        // 书签缺 url —— 属于硬错误，必须拒绝。
+        // A bookmark missing url — a hard error, must be rejected.
         //
-        // 刻意用普通字符串 + Replace 而非插值原始字符串：原始字符串里
-        // "{{" 与结尾的 "}}}" 会被解析器当成"转义花括号"与"插值结束"，
-        // 报错信息（CS9007）完全指不到真正的问题。而 JSON 满屏都是花括号，
-        // 用 $$ 也躲不掉 —— 结尾那三个 } 到底是两个转义加一个内容，还是
-        // 三个内容，取决于 $ 的个数，脆得很。
+        // Deliberately plain string + Replace instead of an interpolated raw string:
+        // "{{" and a trailing "}}}" parse as escaped braces plus interpolation end,
+        // and the CS9007 error points nowhere near the real problem. JSON is full of braces,
+        // and $$ does not save it — whether trailing }}} is two escapes plus content or
+        // three contents depends on the $ count, which is brittle.
         string bad = """
             {"device":"a","state":{"v":1,"items":{
               "@KEY@":{"p":"toolbar_____","t":"b","n":"x","m":"0000000000100-00000","a":"0000000000100-00000"}
@@ -199,17 +199,17 @@ public class ApiEndpointTests
 
         Assert.Equal(HttpStatusCode.BadRequest, status);
         Assert.Contains("validation_failed", body, StringComparison.Ordinal);
-        Assert.Contains("必须有 url", body, StringComparison.Ordinal);
+        Assert.Contains("must have url", body, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task sync接受结构问题但记警告()
+    public async Task SyncAcceptsStructuralIssuesWithWarning()
     {
-        // 父节点缺失只是软警告：为一个孤立节点拒掉整份上传，
-        // 对用户来说比跳过那个节点糟糕得多
+        // A missing parent is only a soft warning: rejecting a whole upload over one orphaned item
+        // is far worse for users than skipping that item
         await using ServerFixture f = await ServerFixture.StartAsync();
 
-        // 父 key 指向一个不存在的 32 位十六进制 key —— 触发"父节点不存在"警告
+        // The parent key points at a nonexistent 32-hex key — triggering the "parent does not exist" warning
         string orphan = """
             {"device":"a","state":{"v":1,"items":{
               "@KEY@":{"p":"99999999999999999999999999999999","t":"b","n":"x","u":"https://x.example","m":"0000000000100-00000","a":"0000000000100-00000"}
@@ -221,7 +221,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task conflicts默认返回50条上限()
+    public async Task ConflictsDefaultLimitFifty()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -235,7 +235,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task history返回空列表()
+    public async Task HistoryReturnsEmptyList()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -248,7 +248,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task 数据端点全部需要token()
+    public async Task AllDataEndpointsRequireToken()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -264,7 +264,7 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task 超限返回429并带RetryAfter()
+    public async Task OverLimitReturns429WithRetryAfter()
     {
         await using ServerFixture f = await ServerFixture.StartAsync(rateLimitPerMinute: 3);
 
@@ -283,11 +283,11 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task 限流在鉴权之前()
+    public async Task RateLimitRunsBeforeAuth()
     {
-        // 顺序很重要：先限流再鉴权。否则一个拿错误 token 的人可以用
-        // 429/401 的响应差异来区分"token 是否存在"。
-        // 这里把额度耗光后再发错误 token，期待拿到 429 而不是 401。
+        // Order matters: rate limit before auth. Otherwise someone with a wrong token could use
+        // the 429/401 difference to tell whether a token exists.
+        // Exhaust the quota here, then send a wrong token and expect 429, not 401.
         await using ServerFixture f = await ServerFixture.StartAsync(rateLimitPerMinute: 1);
 
         (HttpStatusCode first, _) = await f.GetAsync("/api/conflicts", token: ServerFixture.Token);
@@ -298,10 +298,10 @@ public class ApiEndpointTests
     }
 
     [Fact]
-    public async Task 响应里的中文不转义()
+    public async Task ResponseKeepsChineseUnescaped()
     {
-        // 默认的 JSON 编码器会把中文写成 \uXXXX，体积涨 6 倍。
-        // 5000 条书签会从约 800KB 涨到 4MB，撞上 nginx 的 client_max_body_size。
+        // The default JSON encoder writes CJK as \uXXXX, 6x the size.
+        // 5000 bookmarks grow from ~800KB to 4MB and hit nginx client_max_body_size.
         await using ServerFixture f = await ServerFixture.StartAsync();
 
         SyncRequest body = Fx.SyncBody(Fx.Items(

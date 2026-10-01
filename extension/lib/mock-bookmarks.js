@@ -1,20 +1,21 @@
-// extension/lib/mock-bookmarks.js —— browser.bookmarks 的内存替身
+// extension/lib/mock-bookmarks.js — in-memory stand-in for browser.bookmarks
 //
-// 为什么要 mock：`collect` / `apply` 一旦直接调用 `browser.*`，
-// 就只能在 Firefox 里跑，测试反馈循环会长到无法忍受。
-// 两个模块已经写成依赖注入，用这个替身可以在 Node 里跑。
+// Why a mock: once `collect` / `apply` call `browser.*` directly, tests can
+// only run inside Firefox and the feedback loop becomes unbearably long.
+// Both modules are dependency-injected, so this stand-in lets Node run them.
 //
-// 刻意模拟了 Firefox 的几个真实特性，因为它们都是设计里要绕开的坑：
+// It deliberately mimics several real Firefox behaviors, each a pitfall the
+// design works around:
 //
-//   · 用「有没有 url」区分书签与文件夹（不是用 type 字段）
-//   · getTree() 返回带 id="root________" 的虚拟根
-//   · 四个系统根目录用固定 id
-//   · remove() 对文件夹是**递归**的
-//   · id 是本地整数，不可跨设备使用
+//   · bookmarks vs folders distinguished by "has a url" (not a type field)
+//   · getTree() returns a virtual root with id="root________"
+//   · four system roots use fixed ids
+//   · remove() on a folder is **recursive**
+//   · ids are local integers, unusable across devices
 //
-// 用法：
+// Usage:
 //   const bm = new MockBookmarks();
-//   bm.addFolder(ROOT_TOOLBAR, '工作');
+//   bm.addFolder(ROOT_TOOLBAR, 'Work');
 //   const { nodes } = await scan(bm);
 
 import { ROOT_TOOLBAR, ROOT_MENU, ROOT_UNFILED, ROOT_MOBILE } from './keys.js';
@@ -24,17 +25,17 @@ let nextId = 1;
 export class MockBookmarks {
   /**
    * @param {object} [opts]
-   * @param {string[]} [opts.roots] 实际存在的根目录（模拟 Firefox 版本差异）
+   * @param {string[]} [opts.roots] Roots that actually exist (simulates Firefox version differences)
    */
   constructor(opts = {}) {
-    /** @type {Map<string, object>} id → 节点 */
+    /** @type {Map<string, object>} id -> node */
     this.nodes = new Map();
-    /** 调用日志，用于断言 API 调用的顺序与次数 */
+    /** Call log, for asserting API call order and counts */
     this.calls = [];
     this.failOn = new Set();
 
     const roots = opts.roots || [ROOT_TOOLBAR, ROOT_MENU, ROOT_UNFILED, ROOT_MOBILE];
-    // 虚拟根
+    // Virtual root
     this.nodes.set('root________', { id: 'root________', title: '', children: [] });
     for (const id of roots) {
       this._create(id, '', 'root________');
@@ -42,9 +43,9 @@ export class MockBookmarks {
     this._reindex();
   }
 
-  // ── 构造树 ────────────────────────────────────────────────────────
+  // ── Tree construction ─────────────────────────────────────────────
 
-  /** 创建一个节点并挂到 parentId 下。 */
+  /** Create a node under parentId. */
   _create(id, title, parentId, url) {
     this.nodes.set(id, {
       id,
@@ -55,7 +56,7 @@ export class MockBookmarks {
     });
     if (parentId) {
       const parent = this.nodes.get(parentId);
-      if (!parent) throw new Error(`父节点不存在: ${parentId}`);
+      if (!parent) throw new Error(`Parent node missing: ${parentId}`);
       parent.children.push(id);
     }
     return id;
@@ -75,7 +76,7 @@ export class MockBookmarks {
     return id;
   }
 
-  /** 刷新每个节点的 index（与 children 数组顺序一致）。 */
+  /** Refresh each node's index (matches children array order). */
   _reindex() {
     for (const node of this.nodes.values()) {
       (node.children || []).forEach((childId, i) => {
@@ -84,20 +85,20 @@ export class MockBookmarks {
     }
   }
 
-  /** 返回 Firefox bookmarks.getTree() 的结构。 */
+  /** Return the Firefox bookmarks.getTree() shape. */
   _tree() {
     const build = (id) => {
-      const n = this.nodes.get(id);
-      const out = { id: n.id, title: n.title, index: n.index ?? 0 };
-      if (n.url !== undefined) out.url = n.url;
-      if (n.children) out.children = n.children.map(build);
+      const node = this.nodes.get(id);
+      const out = { id: node.id, title: node.title, index: node.index ?? 0 };
+      if (node.url !== undefined) out.url = node.url;
+      if (node.children) out.children = node.children.map(build);
       return out;
     };
     const root = this.nodes.get('root________');
     return [{ id: root.id, title: root.title, children: root.children.map(build) }];
   }
 
-  // ── browser.bookmarks 的替身 ──────────────────────────────────────
+  // ── browser.bookmarks stand-in ────────────────────────────────────
 
   async getTree() {
     this.calls.push({ op: 'getTree' });
@@ -107,20 +108,20 @@ export class MockBookmarks {
   async get(id) {
     this.calls.push({ op: 'get', id });
     if (!this.nodes.has(id)) throw new Error(`no bookmark: ${id}`);
-    const n = this.nodes.get(id);
-    const out = { id: n.id, title: n.title, index: n.index ?? 0 };
-    if (n.url !== undefined) out.url = n.url;
-    if (n.children) out.children = n.children.map((c) => this.nodes.get(c).id);
+    const node = this.nodes.get(id);
+    const out = { id: node.id, title: node.title, index: node.index ?? 0 };
+    if (node.url !== undefined) out.url = node.url;
+    if (node.children) out.children = node.children.map((child) => this.nodes.get(child).id);
     return [out];
   }
 
   async getChildren(id) {
     this.calls.push({ op: 'getChildren', id });
     if (!this.nodes.has(id)) throw new Error(`no bookmark: ${id}`);
-    return (this.nodes.get(id).children || []).map((c) => {
-      const n = this.nodes.get(c);
-      const out = { id: n.id, title: n.title, index: n.index ?? 0 };
-      if (n.url !== undefined) out.url = n.url;
+    return (this.nodes.get(id).children || []).map((child) => {
+      const node = this.nodes.get(child);
+      const out = { id: node.id, title: node.title, index: node.index ?? 0 };
+      if (node.url !== undefined) out.url = node.url;
       return out;
     });
   }
@@ -138,55 +139,55 @@ export class MockBookmarks {
   async update(id, changes) {
     this.calls.push({ op: 'update', id, changes });
     this._maybeFail('update');
-    const n = this.nodes.get(id);
-    if (!n) throw new Error(`no bookmark: ${id}`);
-    if (changes.title !== undefined) n.title = changes.title;
-    if (changes.url !== undefined) n.url = changes.url;
-    return { id, title: n.title, ...(n.url !== undefined ? { url: n.url } : {}) };
+    const node = this.nodes.get(id);
+    if (!node) throw new Error(`no bookmark: ${id}`);
+    if (changes.title !== undefined) node.title = changes.title;
+    if (changes.url !== undefined) node.url = changes.url;
+    return { id, title: node.title, ...(node.url !== undefined ? { url: node.url } : {}) };
   }
 
   async move(id, dest) {
     this.calls.push({ op: 'move', id, dest });
     this._maybeFail('move');
-    const n = this.nodes.get(id);
-    if (!n) throw new Error(`no bookmark: ${id}`);
-    // 摘出旧位置
-    const old = this.nodes.get(n.parentId);
-    if (old) old.children = old.children.filter((c) => c !== id);
-    // 放入新位置
+    const node = this.nodes.get(id);
+    if (!node) throw new Error(`no bookmark: ${id}`);
+    // Detach from the old position
+    const oldParent = this.nodes.get(node.parentId);
+    if (oldParent) oldParent.children = oldParent.children.filter((child) => child !== id);
+    // Attach at the new position
     const target = this.nodes.get(dest.parentId);
     if (!target) throw new Error(`no bookmark: ${dest.parentId}`);
     const at = dest.index === undefined ? target.children.length : dest.index;
     target.children.splice(at, 0, id);
-    n.parentId = dest.parentId;
+    node.parentId = dest.parentId;
     this._reindex();
-    return { id, title: n.title, parentId: dest.parentId };
+    return { id, title: node.title, parentId: dest.parentId };
   }
 
-  /** 删除。**对文件夹递归** —— 这与 Firefox 的真实行为一致。 */
+  /** Remove. **Recursive for folders** — matches real Firefox behavior. */
   async remove(id) {
     this.calls.push({ op: 'remove', id });
     this._maybeFail('remove');
     if (!this.nodes.has(id)) throw new Error(`no bookmark: ${id}`);
-    const n = this.nodes.get(id);
-    const parent = this.nodes.get(n.parentId);
-    if (parent) parent.children = parent.children.filter((c) => c !== id);
+    const node = this.nodes.get(id);
+    const parent = this.nodes.get(node.parentId);
+    if (parent) parent.children = parent.children.filter((child) => child !== id);
     this._dropRecursive(id);
   }
 
   _dropRecursive(id) {
-    const n = this.nodes.get(id);
-    if (!n) return;
-    for (const c of [...(n.children || [])]) this._dropRecursive(c);
+    const node = this.nodes.get(id);
+    if (!node) return;
+    for (const child of [...(node.children || [])]) this._dropRecursive(child);
     this.nodes.delete(id);
   }
 
-  // ── 测试辅助 ──────────────────────────────────────────────────────
+  // ── Test helpers ──────────────────────────────────────────────────
 
-  /** 让某个 op 抛错，用于验证容错路径。 */
+  /** Make an op throw, for exercising failure paths. */
   _maybeFail(op) {
     if (this.failOn.has(op)) {
-      throw new Error(`模拟 ${op} 失败`);
+      throw new Error(`Simulated ${op} failure`);
     }
   }
 
@@ -195,21 +196,21 @@ export class MockBookmarks {
   }
 
   ops() {
-    return this.calls.map((c) => c.op);
+    return this.calls.map((call) => call.op);
   }
 
   countOp(op) {
-    return this.calls.filter((c) => c.op === op).length;
+    return this.calls.filter((call) => call.op === op).length;
   }
 
-  /** 供断言用：把整棵树渲染成可比较的文本。 */
+  /** Render the whole tree as comparable text, for assertions. */
   dump(id = 'root________', depth = 0) {
     const lines = [];
-    for (const c of this.nodes.get(id).children || []) {
-      const n = this.nodes.get(c);
-      const label = n.url !== undefined ? `[${n.title}](${n.url})` : `${n.title}/`;
+    for (const child of this.nodes.get(id).children || []) {
+      const node = this.nodes.get(child);
+      const label = node.url !== undefined ? `[${node.title}](${node.url})` : `${node.title}/`;
       lines.push(`${'  '.repeat(depth)}${label}`);
-      if (n.children) lines.push(...this.dump(c, depth + 1).split('\n').filter(Boolean));
+      if (node.children) lines.push(...this.dump(child, depth + 1).split('\n').filter(Boolean));
     }
     return lines.join('\n');
   }

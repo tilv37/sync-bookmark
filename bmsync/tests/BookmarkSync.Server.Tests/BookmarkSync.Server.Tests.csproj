@@ -1,12 +1,12 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    HTTP 层与进程入口的单元测试。
-    HTTP 层与进程入口的单元测试，用例在服务端从 Go 迁移到 .NET 10 时逐条移植。
+    Unit tests for the HTTP layer and process entry point.
+    Cases were ported one by one when the server migrated from Go to .NET 10.
 
-    用 WebApplicationFactory 起真实的 Kestrel 管道：中间件顺序、
-    限流、鉴权、错误响应格式这些恰恰是"用 TestServer 单独测就测不到"
-    的部分 —— 顺序错了 TestServer 不会告诉你，只有整条管道跑起来才会。
+    Uses WebApplicationFactory to boot the real Kestrel pipeline: middleware ordering,
+    rate limiting, auth, and error response shape are precisely the parts that "testing alone with TestServer cannot cover"
+    — wrong ordering stays invisible under TestServer; only the full pipeline reveals it.
   -->
 
   <PropertyGroup>
@@ -29,8 +29,8 @@
     <ProjectReference Include="..\..\src\BookmarkSync.Store\BookmarkSync.Store.csproj" />
     <ProjectReference Include="..\..\src\BookmarkSync.Domain\BookmarkSync.Domain.csproj" />
     <!--
-      入口项目是 Exe，测试需要直接引用它才能测 -config-check 与
-      healthcheck 子命令。引用 Exe 在 .NET 里是允许的（产出程序集可被引用）。
+      The entry project is an Exe; tests need to reference it directly to cover the -config-check and
+      healthcheck subcommands. Referencing an Exe is allowed in .NET (its output assembly is referenceable).
     -->
     <ProjectReference Include="..\..\src\BookmarkSync.Cli\BookmarkSync.Cli.csproj" />
   </ItemGroup>

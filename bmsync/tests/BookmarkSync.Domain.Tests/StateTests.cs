@@ -1,13 +1,12 @@
 namespace BookmarkSync.Domain.Tests;
 
 /// <summary>
-/// <see cref="State"/> 的单元测试，逐条对应
-/// 数据模型与校验的测试用例（同上）。
+/// Unit tests for <see cref="State"/>, mirroring the data-model and validation test cases.
 /// </summary>
 public class StateTests
 {
     [Fact]
-    public void Validate_接受结构合法的state()
+    public void Validate_AcceptsWellFormedState()
     {
         State s = Fixtures.StateOf(
             ("f", Fixtures.ValidFolder(RootFolders.Toolbar)),
@@ -17,54 +16,54 @@ public class StateTests
         Assert.True(s.Validate().IsValid);
     }
 
-    /// <summary>硬错误：会导致解析出错或资源失控的输入必须被拒绝。</summary>
+    /// <summary>Hard errors: inputs that break parsing or blow up resources must be rejected.</summary>
     public static TheoryData<string, Action<State>, string> HardErrorCases()
     {
         var data = new TheoryData<string, Action<State>, string>();
 
-        data.Add("key 太短", s => s.Items["ab"] = Fixtures.ValidBookmark(RootFolders.Toolbar), "key 非法");
+        data.Add("key too short", s => s.Items["ab"] = Fixtures.ValidBookmark(RootFolders.Toolbar), "invalid item key");
         data.Add(
-            "key 非十六进制",
+            "key not hex",
             s =>
             {
                 s.Items.Remove(Fixtures.KeyOf("b"));
                 s.Items[new string('z', 32)] = Fixtures.ValidBookmark(RootFolders.Toolbar);
             },
-            "key 非法");
+            "invalid item key");
         data.Add(
-            "类型非法",
+            "invalid type",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidBookmark(RootFolders.Toolbar) with { T = "x" },
-            "类型非法");
+            "invalid type");
         data.Add(
-            "书签缺 url",
+            "bookmark missing url",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidBookmark(RootFolders.Toolbar) with { U = string.Empty },
-            "必须有 url");
+            "must have url");
         data.Add(
-            "文件夹带 url",
+            "folder with url",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidFolder(RootFolders.Toolbar) with { U = "https://x.example" },
-            "不应有 url");
+            "must not have url");
         data.Add(
-            "m 非法",
+            "bad m",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidBookmark(RootFolders.Toolbar) with { M = "yesterday" },
-            "不是合法 HLC");
+            "not a valid HLC");
         data.Add(
-            "a 非法",
+            "bad a",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidBookmark(RootFolders.Toolbar) with { A = "???" },
-            "不是合法 HLC");
+            "not a valid HLC");
         data.Add(
-            "标题超长",
+            "title too long",
             s => s.Items[Fixtures.KeyOf("b")] =
                 Fixtures.ValidBookmark(RootFolders.Toolbar) with { N = new string('x', Limits.MaxTitleLen + 1) },
-            "标题长度");
+            "title length");
         data.Add(
-            "url 超长",
+            "url too long",
             s => s.Items[Fixtures.KeyOf("b")] = Fixtures.ValidBookmark(RootFolders.Toolbar) with
             {
                 U = "https://x.example/" + new string('y', Limits.MaxUrlLen),
             },
-            "url 长度");
+            "url length");
         data.Add(
-            "深度超限",
+            "depth over limit",
             s =>
             {
                 var fresh = State.New();
@@ -81,39 +80,39 @@ public class StateTests
                     s.Items[k] = v;
                 }
             },
-            "深度");
+            "depth");
 
         return data;
     }
 
     [Theory]
     [MemberData(nameof(HardErrorCases))]
-    public void Validate_硬错误必须拒绝(string name, Action<State> mutate, string wantSub)
+    public void Validate_HardErrorsAreRejected(string name, Action<State> mutate, string wantSub)
     {
         State s = Fixtures.StateOf(("b", Fixtures.ValidBookmark(RootFolders.Toolbar)));
         mutate(s);
 
         ValidationResult res = s.Validate();
-        Assert.False(res.IsValid, $"应当拒绝却通过了：{name}");
+        Assert.False(res.IsValid, $"should have been rejected but passed: {name}");
         Assert.Contains(wantSub, res.Error!, StringComparison.Ordinal);
     }
 
-    /// <summary>版本不符单独测：<c>State.V</c> 是 init 属性，没法用 <see cref="Action{T}"/> 改。</summary>
+    /// <summary>Version mismatch is tested separately: <c>State.V</c> is init-only and cannot be changed via <see cref="Action{T}"/>.</summary>
     [Fact]
-    public void Validate_版本不符必须拒绝()
+    public void Validate_VersionMismatchIsRejected()
     {
         State withBadVersion = new() { V = 99 };
         ValidationResult r = withBadVersion.Validate();
 
         Assert.False(r.IsValid);
-        Assert.Contains("schema 版本", r.Error!, StringComparison.Ordinal);
+        Assert.Contains("schema version", r.Error!, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Validate_数量超限必须拒绝()
+    public void Validate_OverLimitCountIsRejected()
     {
-        // 只造 key 集合，item 全用同��个合法值 —— 目的是把 item 数顶到上限之上，
-        // 而不关心每个 item 自己的内容。
+        // Only build a key set, reusing one valid item value — the goal is pushing the item
+        // count over the limit without caring about each item's content.
         State s = State.New();
         for (int i = 0; i <= Limits.MaxItems; i++)
         {
@@ -122,54 +121,54 @@ public class StateTests
 
         ValidationResult r = s.Validate();
         Assert.False(r.IsValid);
-        Assert.Contains("超过上限", r.Error!, StringComparison.Ordinal);
+        Assert.Contains("exceeds limit", r.Error!, StringComparison.Ordinal);
     }
 
-    /// <summary>软警告：树结构问题只记录不拒绝。</summary>
+    /// <summary>Soft warnings: tree-structure problems are recorded, not rejected.</summary>
     /// <remarks>
-    /// 让整份上传因为一个孤立节点被拒，对用户来说比跳过那个节点糟糕得多。
+    /// Rejecting a whole upload over one orphaned item is far worse for users than skipping that item.
     /// </remarks>
     public static TheoryData<string, Action<State>, string> SoftWarningCases()
     {
         var data = new TheoryData<string, Action<State>, string>();
 
         data.Add(
-            "父节点缺失",
+            "missing parent",
             s => s.Items[Fixtures.KeyOf("b")] =
                 s.Items[Fixtures.KeyOf("b")] with { P = Fixtures.KeyOf("ghost") },
-            "父节点");
+            "parent");
 
         data.Add(
-            "父节点不是文件夹",
+            "parent not a folder",
             s => s.Items[Fixtures.KeyOf("b")] =
                 s.Items[Fixtures.KeyOf("b")] with { P = Fixtures.KeyOf("other") },
-            "不是文件夹");
+            "is not a folder");
 
         data.Add(
-            "存活项的父节点已删除",
+            "live item with deleted parent",
             s =>
             {
                 s.Items[Fixtures.KeyOf("f")] = Fixtures.Tomb(Fixtures.ValidFolder(RootFolders.Toolbar), Fixtures.T0, 200, 0);
                 s.Items[Fixtures.KeyOf("b")] = s.Items[Fixtures.KeyOf("b")] with { P = Fixtures.KeyOf("f") };
             },
-            "已删除");
+            "is deleted");
 
         data.Add(
-            "父链成环",
+            "parent cycle",
             s =>
             {
                 string a = Fixtures.KeyOf("cyc-a"), b = Fixtures.KeyOf("cyc-b");
                 s.Items[a] = Fixtures.ValidFolder(b);
                 s.Items[b] = Fixtures.ValidFolder(a);
             },
-            "异常");
+            "broken parent chain");
 
         return data;
     }
 
     [Theory]
     [MemberData(nameof(SoftWarningCases))]
-    public void Validate_结构问题记为警告(string name, Action<State> mutate, string wantWarn)
+    public void Validate_StructuralIssuesBecomeWarnings(string name, Action<State> mutate, string wantWarn)
     {
         State s = Fixtures.StateOf(
             ("b", Fixtures.ValidBookmark(RootFolders.Toolbar)),
@@ -179,33 +178,33 @@ public class StateTests
 
         ValidationResult r = s.Validate();
 
-        // 名字带上，断言失败时能立刻看出是哪个场景退化了 ——
-        // 这组用例全是"结构畸形"，只看警告文本很容易分不清是谁的问题。
-        Assert.True(r.IsValid, $"[{name}] 结构问题应记为警告而非硬错误，却返回了：{r.Error}");
+        // Keep the name: when an assertion fails it shows which scenario regressed —
+        // every case here is "structurally malformed", and warning text alone would not tell them apart.
+        Assert.True(r.IsValid, $"[{name}] structural issues should warn, not hard-fail, but got: {r.Error}");
 
         string joined = string.Join("; ", r.Warnings);
         Assert.Contains(wantWarn, joined, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Validate_墓碑缺删除时间只警告()
+    public void Validate_TombstoneMissingDeletionTimeWarnsOnly()
     {
         Item it = Fixtures.ValidBookmark(RootFolders.Toolbar) with { D = true, X = 0 };
         State s = Fixtures.StateOf(("b", it));
 
         ValidationResult r = s.Validate();
-        Assert.True(r.IsValid, $"不应是硬错误：{r.Error}");
-        Assert.Contains("缺少删除时间", string.Join(";", r.Warnings), StringComparison.Ordinal);
+        Assert.True(r.IsValid, $"should not be a hard error: {r.Error}");
+        Assert.Contains("missing deletion time", string.Join(";", r.Warnings), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Validate_空state合法()
+    public void Validate_EmptyStateIsValid()
     {
         Assert.True(State.New().Validate().IsValid);
     }
 
     [Fact]
-    public void Clone_是深拷贝()
+    public void Clone_IsDeepCopy()
     {
         State s = Fixtures.StateOf(("b", Fixtures.ValidBookmark(RootFolders.Toolbar)));
         State c = s.Clone();
@@ -218,7 +217,7 @@ public class StateTests
     }
 
     [Fact]
-    public void CountActive_墓碑不计入()
+    public void CountActive_ExcludesTombstones()
     {
         State s = Fixtures.StateOf(
             ("a", Fixtures.ValidBookmark(RootFolders.Toolbar)),
@@ -229,7 +228,7 @@ public class StateTests
     }
 
     [Fact]
-    public void KeysSorted_多次调用结果一致()
+    public void KeysSorted_StableAcrossCalls()
     {
         State s = State.New();
         for (int i = 0; i < 50; i++)
@@ -248,20 +247,20 @@ public class StateTests
     }
 
     [Fact]
-    public void 根目录常量正确()
+    public void RootFolderConstantsAreCorrect()
     {
         foreach (string id in new[]
                  {
                      RootFolders.Toolbar, RootFolders.Menu, RootFolders.Unfiled, RootFolders.Mobile,
                  })
         {
-            Assert.True(RootFolders.IsRootFolder(id), $"\"{id}\" 应被识别为根目录");
+            Assert.True(RootFolders.IsRootFolder(id), $"\"{id}\" should be recognized as a root folder");
         }
 
         Assert.False(RootFolders.IsRootFolder("some-folder-key"));
         Assert.False(RootFolders.IsRootFolder(null));
 
-        // 根目录 id 长度必须与设计文档一致（Firefox Places 的固定 id）
+        // Root ids must keep the design-doc length (fixed Firefox Places ids).
         foreach (string id in new[]
                  {
                      RootFolders.Toolbar, RootFolders.Menu, RootFolders.Unfiled, RootFolders.Mobile,
@@ -272,7 +271,7 @@ public class StateTests
     }
 
     [Fact]
-    public void SameContent_忽略时间戳与墓碑位()
+    public void SameContent_IgnoresTimestampsAndTombstoneBits()
     {
         Item a = Fixtures.ValidBookmark(RootFolders.Toolbar);
         Item b = a with
@@ -285,9 +284,9 @@ public class StateTests
 
         Assert.True(
             Merger.SameContent(a, b),
-            "SameContent 不应比较 M/A/D/X —— 两端各自重新保存一次不应被当成冲突");
+            "SameContent must not compare M/A/D/X — each side re-saving must not count as a conflict");
 
-        Item c = a with { N = "别的标题" };
+        Item c = a with { N = "Another title" };
         Assert.False(Merger.SameContent(a, c));
     }
 }

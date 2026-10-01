@@ -1,168 +1,172 @@
-// extension/lib/hlc.js —— 混合逻辑时钟（Hybrid Logical Clock）
+// extension/lib/hlc.js — Hybrid Logical Clock (HLC)
 //
-// ⚠️ 本文件与 bmsync/hlc.go 必须**逐行等价**。两端的编码格式、分支顺序、
-//    溢出处理只要有一处不同，合并在 "m 恰好相等" 的分支上就会产生非确定
-//    行为 —— 同一对书签在不同轮次里交替获胜，最终两端发散且无法察觉。
+// WARNING: This file must stay line-by-line equivalent with
+// BookmarkSync.Domain/Hlc.cs. If the encoding format, branch order, or
+// overflow handling differ in even one place, merges on the "m exactly equal"
+// branch become nondeterministic — the same bookmark pair alternately wins
+// across rounds, and both sides diverge without anyone noticing.
 //
-//    一致性由 test/hlc_vectors.json 保证：Go 端导出输入序列与期望输出，
-//    JS 端逐条复现（见 hlc.test.js）。
+// Consistency is guaranteed by test/hlc_vectors.json: the C# side exports
+// input sequences with expected outputs, and the JS side replays them one by
+// one (see hlc.test.js).
 //
-// 论文：Kulkarni et al., "Logical Physical Clocks and Consistent Snapshots
+// Paper: Kulkarni et al., "Logical Physical Clocks and Consistent Snapshots
 //       in Globally Distributed Databases", 2014
 
 const PHYSICAL_DIGITS = 13;
 const COUNTER_DIGITS = 5;
 const COUNTER_MAX = 99_999;
 
-/** 最小时间戳，用作"还没见过任何事件"的初值。 */
+/** Minimum timestamp, used as the "no event seen yet" initial value. */
 export const HLC_ZERO = '0000000000000-00000';
 
 const FORMAT_RE = /^\d{13}-\d{5}$/;
 
 /**
- * 把 (物理毫秒, 逻辑计数) 编码成定宽字符串。
- * 定宽保证「字符串字典序 == 时间戳全序」，因此 compare 直接用字符串比较，
- * 不需要解析。
+ * Encode (physical milliseconds, logical counter) as a fixed-width string.
+ * Fixed width guarantees "lexicographic order == timestamp total order",
+ * so compare() uses plain string comparison without parsing.
  */
-export function encode(l, c) {
-  return String(l).padStart(PHYSICAL_DIGITS, '0') + '-' + String(c).padStart(COUNTER_DIGITS, '0');
+export function encode(physicalMs, counter) {
+  return String(physicalMs).padStart(PHYSICAL_DIGITS, '0') + '-' + String(counter).padStart(COUNTER_DIGITS, '0');
 }
 
-/** 解析 HLC 字符串。失败返回 null（而不是抛异常）—— 非法输入不该让同步崩掉。 */
-export function decode(s) {
-  if (typeof s !== 'string' || s.length !== PHYSICAL_DIGITS + 1 + COUNTER_DIGITS) return null;
-  if (s[PHYSICAL_DIGITS] !== '-') return null;
-  const ls = s.slice(0, PHYSICAL_DIGITS);
-  const cs = s.slice(PHYSICAL_DIGITS + 1);
-  if (!/^\d+$/.test(ls) || !/^\d{5}$/.test(cs)) return null;
-  return { l: Number(ls), c: Number(cs) };
+/** Parse an HLC string. Returns null on failure (instead of throwing) — bad input must not crash sync. */
+export function decode(hlcString) {
+  if (typeof hlcString !== 'string' || hlcString.length !== PHYSICAL_DIGITS + 1 + COUNTER_DIGITS) return null;
+  if (hlcString[PHYSICAL_DIGITS] !== '-') return null;
+  const physicalPart = hlcString.slice(0, PHYSICAL_DIGITS);
+  const counterPart = hlcString.slice(PHYSICAL_DIGITS + 1);
+  if (!/^\d+$/.test(physicalPart) || !/^\d{5}$/.test(counterPart)) return null;
+  return { l: Number(physicalPart), c: Number(counterPart) };
 }
 
-export function isValidHLC(s) {
-  return typeof s === 'string' && FORMAT_RE.test(s);
+export function isValidHLC(hlcString) {
+  return typeof hlcString === 'string' && FORMAT_RE.test(hlcString);
 }
 
 /**
- * 比较两个 HLC：-1 / 0 / 1。
+ * Compare two HLCs: -1 / 0 / 1.
  *
- * 非法时间戳被当作比任何合法值都**小**，与 Go 端行为一致 ——
- * 这样被污染的一侧永远输，不会污染权威状态。
+ * Malformed timestamps sort **below** every valid value, matching the C#
+ * behavior — the polluted side always loses and cannot poison authority.
  */
-export function compare(a, b) {
-  const da = decode(a);
-  const db = decode(b);
-  if (da === null && db === null) return a < b ? -1 : a > b ? 1 : 0;
-  if (da === null) return -1;
-  if (db === null) return 1;
-  if (da.l !== db.l) return da.l < db.l ? -1 : 1;
-  if (da.c !== db.c) return da.c < db.c ? -1 : 1;
+export function compare(leftHlc, rightHlc) {
+  const leftDecoded = decode(leftHlc);
+  const rightDecoded = decode(rightHlc);
+  if (leftDecoded === null && rightDecoded === null) return leftHlc < rightHlc ? -1 : leftHlc > rightHlc ? 1 : 0;
+  if (leftDecoded === null) return -1;
+  if (rightDecoded === null) return 1;
+  if (leftDecoded.l !== rightDecoded.l) return leftDecoded.l < rightDecoded.l ? -1 : 1;
+  if (leftDecoded.c !== rightDecoded.c) return leftDecoded.c < rightDecoded.c ? -1 : 1;
   return 0;
 }
 
-export function maxHLC(...list) {
-  let out = HLC_ZERO;
-  for (const s of list) {
-    if (compare(s, out) > 0) out = s;
+export function maxHLC(...hlcList) {
+  let best = HLC_ZERO;
+  for (const candidate of hlcList) {
+    if (compare(candidate, best) > 0) best = candidate;
   }
-  return out;
+  return best;
 }
 
-/** 混合逻辑时钟实例。 */
+/** Hybrid logical clock instance. */
 export class HLC {
-  #l = 0;
-  #c = 0;
+  #physicalMs = 0;
+  #logicalCounter = 0;
   #now;
 
   /**
-   * @param {() => number} nowMs 返回当前墙钟毫秒。测试时注入固定时钟。
+   * @param {() => number} nowMs Returns current wall-clock milliseconds. Inject a fixed clock in tests.
    */
   constructor(nowMs = () => Date.now()) {
     this.#now = nowMs;
   }
 
   #normalize() {
-    if (this.#c > COUNTER_MAX) {
-      this.#l += 1;
-      this.#c = 0;
+    if (this.#logicalCounter > COUNTER_MAX) {
+      this.#physicalMs += 1;
+      this.#logicalCounter = 0;
     }
   }
 
-  /** 为一个本地事件产生时间戳。 */
+  /** Produce a timestamp for a local event. */
   now() {
-    const p = this.#now();
-    if (p > this.#l) {
-      this.#l = p;
-      this.#c = 0;
+    const wallNowMs = this.#now();
+    if (wallNowMs > this.#physicalMs) {
+      this.#physicalMs = wallNowMs;
+      this.#logicalCounter = 0;
     } else {
-      this.#c += 1;
+      this.#logicalCounter += 1;
     }
     this.#normalize();
-    return encode(this.#l, this.#c);
+    return encode(this.#physicalMs, this.#logicalCounter);
   }
 
   /**
-   * 收到远端时间戳后推进本地时钟。
+   * Advance the local clock after receiving a remote timestamp.
    *
-   * 分支顺序至关重要（与 Go 端一一对应）：
-   *   1. max == l && max == p → c = max(c, rc) + 1
-   *   2. max == l            → c = c + 1
-   *   3. max == rl            → c = rc + 1
-   *   4. 否则（全新毫秒）      → c = 0
+   * Branch order is critical (mirrors the C# side one-to-one):
+   *   1. maxObserved == local && maxObserved == physicalNow → counter = max(counter, remoteCounter) + 1
+   *   2. maxObserved == local                               → counter = counter + 1
+   *   3. maxObserved == remotePhysical                      → counter = remoteCounter + 1
+   *   4. otherwise (brand-new millisecond)                 → counter = 0
    *
-   * 第 3 条必须排在"物理时钟领先"之前。反例：A 在第 1000ms 内产生计数为
-   * 5 的事件，接收方物理时钟也是 1000ms 但自身计数为 0。若此时走第 4 条
-   * 得到 (1000, 0)，其后的 (1000, 1) 会**小于**收到的 (1000, 5)，
-   * 因果性被破坏，症状是"书签随机丢失"。
+   * Rule 3 must come before "physical clock is ahead". Counter-example: A emits
+   * an event at millisecond 1000 with counter 5, while the receiver's physical
+   * clock is also at 1000ms but its own counter is 0. Taking rule 4 here yields
+   * (1000, 0), and a later (1000, 1) would sort **below** the received
+   * (1000, 5) — causality is broken and the symptom is "bookmarks randomly lost".
    */
   update(remote) {
-    const p = this.#now();
-    const rd = decode(remote);
+    const physicalNow = this.#now();
+    const remoteDecoded = decode(remote);
 
-    if (rd === null) {
-      // 远端非法：退化成纯本地推进
-      if (p > this.#l) {
-        this.#l = p;
-        this.#c = 0;
+    if (remoteDecoded === null) {
+      // Remote is malformed: degrade to a pure local tick
+      if (physicalNow > this.#physicalMs) {
+        this.#physicalMs = physicalNow;
+        this.#logicalCounter = 0;
       } else {
-        this.#c += 1;
+        this.#logicalCounter += 1;
       }
       this.#normalize();
-      return encode(this.#l, this.#c);
+      return encode(this.#physicalMs, this.#logicalCounter);
     }
 
-    let max = this.#l;
-    if (p > max) max = p;
-    if (rd.l > max) max = rd.l;
+    let maxObserved = this.#physicalMs;
+    if (physicalNow > maxObserved) maxObserved = physicalNow;
+    if (remoteDecoded.l > maxObserved) maxObserved = remoteDecoded.l;
 
-    if (max === this.#l && max === p) {
-      if (rd.c > this.#c) this.#c = rd.c;
-      this.#c += 1;
-    } else if (max === this.#l) {
-      this.#c += 1;
-    } else if (max === rd.l) {
-      this.#c = rd.c + 1;
+    if (maxObserved === this.#physicalMs && maxObserved === physicalNow) {
+      if (remoteDecoded.c > this.#logicalCounter) this.#logicalCounter = remoteDecoded.c;
+      this.#logicalCounter += 1;
+    } else if (maxObserved === this.#physicalMs) {
+      this.#logicalCounter += 1;
+    } else if (maxObserved === remoteDecoded.l) {
+      this.#logicalCounter = remoteDecoded.c + 1;
     } else {
-      this.#c = 0;
+      this.#logicalCounter = 0;
     }
-    this.#l = max;
+    this.#physicalMs = maxObserved;
 
     this.#normalize();
-    return encode(this.#l, this.#c);
+    return encode(this.#physicalMs, this.#logicalCounter);
   }
 
-  /** 返回当前时间戳但不推进计数。 */
+  /** Return the current timestamp without advancing the counter. */
   current() {
-    return encode(this.#l, this.#c);
+    return encode(this.#physicalMs, this.#logicalCounter);
   }
 
-  /** 批量吸收远端时间戳，把本地时钟推进到它们的最大值之后。 */
-  observeMany(list) {
-    for (const s of list) {
-      const d = decode(s);
-      if (d === null) continue;
-      if (d.l > this.#l || (d.l === this.#l && d.c > this.#c)) {
-        this.#l = d.l;
-        this.#c = d.c;
+  /** Absorb many remote timestamps, advancing the local clock past their maximum. */
+  observeMany(hlcList) {
+    for (const candidate of hlcList) {
+      const decoded = decode(candidate);
+      if (decoded === null) continue;
+      if (decoded.l > this.#physicalMs || (decoded.l === this.#physicalMs && decoded.c > this.#logicalCounter)) {
+        this.#physicalMs = decoded.l;
+        this.#logicalCounter = decoded.c;
       }
     }
     return this.current();
@@ -170,7 +174,7 @@ export class HLC {
 }
 
 /**
- * 编码格式说明，与 Go 端 hlcLayout 常量保持一致。
- * 13 位物理毫秒 + '-' + 5 位逻辑计数，例：1790000000000-00042
+ * Encoding layout, kept in sync with the Hlc layout constant on the C# side.
+ * 13-digit physical milliseconds + '-' + 5-digit logical counter, e.g. 1790000000000-00042
  */
-export const HLC_LAYOUT = '13 位物理毫秒 + "-" + 5 位逻辑计数，例：1790000000000-00042';
+export const HLC_LAYOUT = '13-digit physical ms + "-" + 5-digit logical counter, e.g. 1790000000000-00042';

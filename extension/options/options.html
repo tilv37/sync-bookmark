@@ -1,8 +1,9 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>BM Sync 设置</title>
+    <title>BM Sync Settings</title>
+    <link rel="icon" href="../icon.png" />
     <style>
       :root {
         --fg: #15141a;
@@ -58,63 +59,63 @@
     </style>
   </head>
   <body>
-    <h1>BM Sync 设置</h1>
-    <p class="hint">书签在你自己的服务器上合并。反代（证书、HTTPS）由 Nginx Proxy Manager 负责。</p>
+    <h1><img src="../icon.png" alt="" width="28" height="28" style="vertical-align: -6px; margin-right: 0.4rem;" />BM Sync Settings</h1>
+    <p class="hint">Bookmarks merge on your own server. Reverse proxy (certs, HTTPS) is handled by Nginx Proxy Manager.</p>
 
-    <h2>连接</h2>
+    <h2>Connection</h2>
 
     <label for="serverUrl">
-      服务器地址
-      <span class="sub">只需填域名，可省略 <code>https://</code> 与 <code>/api</code></span>
+      Server URL
+      <span class="sub">Domain only; <code>https://</code> and <code>/api</code> are optional</span>
     </label>
     <input id="serverUrl" type="text" placeholder="bmsync.example.com" spellcheck="false" />
 
     <label for="token">
-      访问令牌
-      <span class="sub">与服务器的 <code>BMSYNC_TOKEN</code> 一致</span>
+      Access token
+      <span class="sub">Must match the server <code>BMSYNC_TOKEN</code></span>
     </label>
     <div class="row">
       <input id="token" type="password" placeholder="openssl rand -hex 32" spellcheck="false" />
-      <button id="toggleToken" type="button">显示</button>
+      <button id="toggleToken" type="button">Show</button>
     </div>
 
     <div class="row">
-      <button id="test" class="primary" type="button">测试连接</button>
-      <button id="save" type="button">保存</button>
+      <button id="test" class="primary" type="button">Test connection</button>
+      <button id="save" type="button">Save</button>
     </div>
     <p id="connStatus" class="status"></p>
 
-    <h2>同步范围</h2>
+    <h2>Sync scope</h2>
     <fieldset>
-      <legend>纳入同步的根目录</legend>
-      <label class="check"><input type="checkbox" id="rootToolbar" /> 书签栏</label>
-      <label class="check"><input type="checkbox" id="rootMenu" /> 菜单</label>
-      <label class="check"><input type="checkbox" id="rootUnfiled" /> 其他书签</label>
-      <label class="check"><input type="checkbox" id="rootMobile" /> 移动设备书签</label>
+      <legend>Root folders to sync</legend>
+      <label class="check"><input type="checkbox" id="rootToolbar" /> Bookmarks Toolbar</label>
+      <label class="check"><input type="checkbox" id="rootMenu" /> Bookmarks Menu</label>
+      <label class="check"><input type="checkbox" id="rootUnfiled" /> Other Bookmarks</label>
+      <label class="check"><input type="checkbox" id="rootMobile" /> Mobile Bookmarks</label>
       <p class="status muted">
-        移动设备书签默认排除：桌面端通常用不上，且在手机上会产生大量无意义同步。
+        Mobile Bookmarks are excluded by default: rarely useful on desktop and noisy on phones.
       </p>
     </fieldset>
 
-    <h2>冲突记录</h2>
+    <h2>Conflict log</h2>
     <div class="row">
-      <button id="loadConflicts" type="button">刷新</button>
-      <span class="status muted">冲突按时间戳静默决胜，这里只做查看</span>
+      <button id="loadConflicts" type="button">Refresh</button>
+      <span class="status muted">Conflicts resolve silently by timestamp; view-only here</span>
     </div>
     <div id="conflictBox"></div>
 
-    <h2>历史快照</h2>
+    <h2>History snapshots</h2>
     <div class="row">
-      <button id="loadHistory" type="button">刷新</button>
-      <span class="status muted">服务端每次成功写入前自动快照，保留最近 30 份</span>
+      <button id="loadHistory" type="button">Refresh</button>
+      <span class="status muted">Server snapshots automatically before each successful write, keeps the latest 30</span>
     </div>
     <div id="historyBox"></div>
 
-    <h2>危险操作</h2>
+    <h2>Danger zone</h2>
     <p class="status muted">
-      清空本地缓存并重新同步。<strong>不会删除云端数据</strong>，下次同步会把云端状态重新拉回来。
+      Clear the local cache and re-sync. <strong>Cloud data is kept</strong>; the next sync pulls it back.
     </p>
-    <button id="reset" class="danger" type="button">清空本地缓存</button>
+    <button id="reset" class="danger" type="button">Clear local cache</button>
     <p id="resetStatus" class="status"></p>
 
     <script type="module" src="options.js"></script>

@@ -14,29 +14,29 @@ using Microsoft.Extensions.Logging.Abstractions;
 namespace BookmarkSync.Server.Tests;
 
 /// <summary>
-/// 用 TestServer 起一整条真实管道，而不是单独测处理器。
+/// Spin up a full real pipeline instead of testing handlers in isolation.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 这不是"更严格的测法"，而是<b>唯一测得到</b>的测法：中间件顺序、限流、
-/// 鉴权、Content-Type 这些恰恰是"处理器本身完全正确、但管道装错了"
-/// 的部分。ASP.NET Core 的一次真实事故就是
-/// <c>AddSingleton(async sp =&gt; ...)</c> 被推断成
-/// <c>Task&lt;T&gt;</c> —— 所有处理器单测全绿，DI 里根本没有注册那个服务，
-/// 直到第一个请求才炸。单元测试结构上无法发现这类问题。
+/// Not a "stricter way to test" but the <b>only way that catches</b> middleware order, rate
+/// limits, auth, and Content-Type — exactly the "handlers are correct but the pipeline is
+/// miswired" class. One real ASP.NET Core incident was
+/// <c>AddSingleton(async sp =&gt; ...)</c> inferring to
+/// <c>Task&lt;T&gt;</c> — every handler unit test green, the service never registered in DI,
+/// exploding only on the first request. Unit tests structurally cannot catch that.
 /// </para>
 /// <para>
-/// 起<b>真 Kestrel</b> 而不用 TestServer：TestServer 需要包一层
-/// <c>WebApplicationFactory</c> 才能接管 host，而本项目的
-/// <c>BmsyncServer.Build</c> 是自己 <c>WebApplication.CreateBuilder</c> 的，
-/// 硬去取 TestServer 会得到一个与被测逻辑毫无关系的
-/// <c>InvalidCastException</c>。起真 Kestrel 的代价是端口分配（用端口 0
-/// 让系统选），换来的是"生产代码零改动就能被测"。
+/// A <b>real Kestrel</b> instead of TestServer: TestServer needs a
+/// <c>WebApplicationFactory</c> wrapper to own the host, while this project's
+/// <c>BmsyncServer.Build</c> calls <c>WebApplication.CreateBuilder</c> itself — forcing
+/// TestServer yields an <c>InvalidCastException</c> unrelated to the logic under test.
+/// Real Kestrel costs port allocation (port 0 lets the OS choose) and buys "production code
+/// testable with zero changes".
 /// </para>
 /// </remarks>
 internal sealed class ServerFixture : IAsyncDisposable
 {
-    public const string Token = "tttttttttttttttttttttttttttttttttttttttt"; // 40 个 t
+    public const string Token = "tttttttttttttttttttttttttttttttttttttttt"; // 40 t chars
 
     private readonly WebApplication _app;
 
@@ -60,9 +60,9 @@ internal sealed class ServerFixture : IAsyncDisposable
 
         ServerOptions options = new()
         {
-            // 端口 0 = 让操作系统分配一个空闲端口。多个测试并行跑时
-            // 写死端口必然撞车，而撞车的症状（另一个测试的 500）会被
-            // 误读成"代码有问题"。
+            // Port 0 = let the OS pick a free port. Parallel tests on a fixed port would
+            // inevitably collide, and the symptom (another test's 500) would be misread
+            // as "broken code".
             Addr = "127.0.0.1:0",
             Token = token ?? Token,
             DataDir = dataDir,
@@ -76,8 +76,8 @@ internal sealed class ServerFixture : IAsyncDisposable
         app.Urls.Clear();
         app.Urls.Add("http://127.0.0.1:0");
 
-        // 限流值可被测试覆盖。默认 60 次/分钟对"测第 61 次被拒"来说太慢
-        // （要用真实时间等一分钟），所以这里允许把它调小。
+        // The rate limit can be overridden by tests. The default 60/min is too slow for "the 61st
+        // request is rejected" (it would need a real minute of waiting), so shrinking is allowed here.
         if (rateLimitPerMinute is { } limit)
         {
             var rl = app.Services.GetRequiredService<RateLimiter>();
@@ -86,10 +86,10 @@ internal sealed class ServerFixture : IAsyncDisposable
 
         await app.StartAsync();
 
-        // 端口 0 的实际绑定结果要从 server features 里读回来：
-        // app.Urls 里留的还是 "http://127.0.0.1:0" 那个占位串。
-        // 少了这一步，HttpClient 会去连 0 号端口，报"连接被拒绝"，
-        // 看起来像服务没起来。
+        // The actual port-0 binding must be read back from server features:
+        // app.Urls still holds the "http://127.0.0.1:0" placeholder.
+        // Without this step HttpClient dials port 0, gets "connection refused",
+        // and it looks like the service never started.
         string baseAddress = app.Urls.FirstOrDefault() ?? "http://127.0.0.1:0";
         if (Uri.TryCreate(baseAddress, UriKind.Absolute, out Uri? parsed)
             && parsed.Port == 0
@@ -102,12 +102,12 @@ internal sealed class ServerFixture : IAsyncDisposable
     }
 
     /// <summary>
-    /// 替换限流器的额度。
+    /// Replace the rate limiter quota.
     /// </summary>
     /// <remarks>
-    /// <see cref="RateLimiter"/> 的额度是构造时定下的 readonly 字段，
-    /// 换掉整个实例比"改字段"诚实 —— 后者需要在生产类型上留一个只给测试用的
-    /// setter，那会削弱"额度不可变"这个性质。
+    /// <see cref="RateLimiter"/>'s quota used to be a construction-time readonly field, so
+    /// swapping the whole instance is more honest than "mutating a field" — the latter would need
+    /// a test-only setter on a production type, weakening the "quota is immutable" property.
     /// </remarks>
     private static void ReseedRateLimiter(RateLimiter rl, int limit) =>
         rl.OverrideLimitForTest(limit);
@@ -133,8 +133,8 @@ internal sealed class ServerFixture : IAsyncDisposable
         }
         else if (payload is not null)
         {
-            // 用 ApiJson.StrictRequest 而不是 BmsyncJson.Storage：请求侧要
-            // 能序列化 SyncRequest，且不该被源生成绕开自定义转换器。
+            // ApiJson.StrictRequest, not BmsyncJson.Storage: the request side must
+            // serialize SyncRequest without source generation bypassing the custom converters.
             req.Content = new StringContent(
                 JsonSerializer.Serialize(payload, ApiJson.Response), Encoding.UTF8, "application/json");
         }
@@ -163,12 +163,12 @@ internal sealed class ServerFixture : IAsyncDisposable
         }
         catch (IOException)
         {
-            // 测试清理失败不该让测试失败 —— 那是 Windows 上文件句柄的释放时机问题
+            // Test cleanup failures must not fail tests — on Windows that is just handle-release timing
         }
     }
 }
 
-/// <summary>HTTP 层的测试脚手架。</summary>
+/// <summary>Test scaffolding for the HTTP layer.</summary>
 internal static class Fx
 {
     public const string Key1 = "11111111111111111111111111111111";
@@ -198,15 +198,15 @@ internal static class Fx
     }
 
     /// <summary>
-    /// 构造一个 /api/sync 请求体。
+    /// Build a /api/sync request body.
     /// </summary>
     /// <remarks>
-    /// 返回类型是 <see cref="State"/> 而不是匿名对象。原因是 PublishAot 关掉了
-    /// 反射式 JSON，而源生成上下文**只认编译期登记过的类型** ——
-    /// 匿名类型是编译时凭空生成的，任何上下文都不认识它。
-    /// 症状是 NotSupportedException，而且报的是
-    /// "&lt;&gt;f__AnonymousType0`3[...]"，指向完全错误的方向
-    /// （看起来像框架的 bug，其实是测试代码的形状不对）。
+    /// The return type is <see cref="State"/>, not an anonymous object. PublishAot disables
+    /// reflection-based JSON, and generated contexts only know **compile-time registered types** —
+    /// anonymous types are compiler-invented, so no context knows them.
+    /// The symptom is NotSupportedException reporting
+    /// "&lt;&gt;f__AnonymousType0`3[...]", pointing in a completely wrong direction
+    /// (it looks like a framework bug, but the test code shape is at fault).
     /// </remarks>
     public static SyncRequest SyncBody(
         Dictionary<string, Item> items,

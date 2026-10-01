@@ -5,16 +5,16 @@ using System.Text;
 namespace BookmarkSync.Server;
 
 /// <summary>
-/// 鉴权与限流。这是本项目唯一的"信任边界"。
+/// Auth and rate limiting. The only trust boundary in this project.
 /// </summary>
 /// <remarks>
-/// 改动这里的每一行都应该是一次有意识的决定，而不是顺手重构。
+/// Every line changed here should be a deliberate decision, never drive-by refactoring.
 /// </remarks>
 public static class Auth
 {
     /// <summary>
-    /// 从 Authorization 头里取出令牌。Bearer 前缀大小写不敏感
-    /// （RFC 7235 的 scheme 是 case-insensitive）。
+    /// Extract the token from the Authorization header. The Bearer prefix is
+    /// case-insensitive (RFC 7235 schemes are case-insensitive).
     /// </summary>
     public static string BearerToken(HttpRequest request)
     {
@@ -28,14 +28,14 @@ public static class Auth
     }
 
     /// <summary>
-    /// 恒定时间比较两个令牌。
+    /// Compare two tokens in constant time.
     /// </summary>
     /// <remarks>
-    /// 防的是"通过响应时间差异逐字节猜出 token"。但要先比长度：
-    /// <c>CryptographicOperations.FixedTimeEquals</c> 在长度不等时**立即**
-    /// 返回 false，直接用会让"长度对但内容错"和"长度就不对"在耗时上可区分 ——
-    /// 而 token 长度是公开的（写死在配置里），所以这个区分无害，
-    /// 真正要保护的是长度相同的情况。
+    /// Guards against guessing the token byte-by-byte via response-time differences. Length
+    /// is compared first: <c>CryptographicOperations.FixedTimeEquals</c> returns **immediately**
+    /// on unequal lengths, which distinguishes "right length, wrong content" from "wrong
+    /// length" by timing — but token length is public (fixed in config), so that leak is
+    /// harmless; what must be protected is the equal-length case.
     /// </remarks>
     public static bool TokenMatches(string presented, string expected)
     {
@@ -51,13 +51,13 @@ public static class Auth
     }
 
     /// <summary>
-    /// 取真实客户端 IP。反代场景下 X-Forwarded-For 的第一段才是真实来源；
-    /// 只取第一段，避免伪造的头绕过限流。
+    /// Resolve the real client IP. Behind a reverse proxy the first X-Forwarded-For segment
+    /// is the true source; only the first segment is used so a forged header cannot bypass limits.
     /// </summary>
     /// <remarks>
-    /// ⚠️ 这信任前提是「前置反代会正确设置并覆盖 X-Forwarded-For」。
-    /// 若服务可能直接暴露在公网，攻击者能随便伪造这个头来绕过限流。
-    /// compose 里绑定 127.0.0.1 正是为此 —— 见 docs/design.md §10.3。
+    /// ⚠️ This trusts that the front reverse proxy correctly sets and overwrites X-Forwarded-For.
+    /// If the service were exposed directly to the internet, an attacker could forge this
+    /// header to bypass rate limiting. Binding 127.0.0.1 in compose is exactly for this — see docs/architecture.md §9.
     /// </remarks>
     public static string ClientIp(HttpRequest request)
     {
@@ -77,18 +77,18 @@ public static class Auth
     }
 
     /// <summary>
-    /// 所有数据接口共用的中间件：限流 + Bearer token 鉴权。
+    /// Shared middleware for all data endpoints: rate limiting + Bearer token auth.
     /// </summary>
     /// <remarks>
-    /// 顺序很重要：先限流再鉴权。否则一个拿到错误 token 的人可以用
-    /// 429/401 的响应差异来区分"token 是否存在"。
+    /// Order matters: rate limit before auth. Otherwise someone with a wrong token could use
+    /// the 429/401 difference to tell whether a token exists.
     /// <para>
-    /// 返回 <see cref="Func{RequestDelegate, RequestDelegate}"/> 而不是
-    /// <see cref="RequestDelegate"/>：ASP.NET Core 的中间件是
-    /// "next 在外、自己在里" 的结构，工厂形式才能正确地把控制权交给下游。
-    /// 写成不接受 next 的单参数委托，最多是编译不过；写成"调用一个空的
-    /// next"，则会让所有受保护的端点变成<b>永远不执行</b>，而症状只是
-    /// "接口返回空响应" —— 那是最难查的一类 bug。
+    /// Returns <see cref="Func{RequestDelegate, RequestDelegate}"/> rather than
+    /// <see cref="RequestDelegate"/>: ASP.NET Core middleware is structured "next outside,
+    /// self inside", so only the factory form hands control downstream correctly.
+    /// A single-parameter delegate without next fails to compile at best; calling an empty
+    /// next would make every protected endpoint <b>never run</b> with only an "empty
+    /// response" symptom — the hardest bug class to trace.
     /// </para>
     /// </remarks>
     public static Func<RequestDelegate, RequestDelegate> Protect(
@@ -103,7 +103,7 @@ public static class Auth
                 ctx.Response.Headers["Retry-After"] = "60";
                 await HttpJson
                     .WriteErrorAsync(ctx, StatusCodes.Status429TooManyRequests,
-                        ErrorCodes.RateLimited, "请求过于频繁，请稍后再试")
+                        ErrorCodes.RateLimited, "Too many requests, please try again later")
                     .ConfigureAwait(false);
                 return;
             }
@@ -111,10 +111,10 @@ public static class Auth
             string presented = BearerToken(ctx.Request);
             if (!TokenMatches(presented, cfg.Token))
             {
-                log.LogWarning("鉴权失败 {Ip} {Path}", ip, ctx.Request.Path.Value);
+                log.LogWarning("Auth failed {Ip} {Path}", ip, ctx.Request.Path.Value);
                 await HttpJson
                     .WriteErrorAsync(ctx, StatusCodes.Status401Unauthorized,
-                        ErrorCodes.Unauthorized, "访问令牌无效")
+                        ErrorCodes.Unauthorized, "Invalid access token")
                     .ConfigureAwait(false);
                 return;
             }

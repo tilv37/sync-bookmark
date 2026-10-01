@@ -1,18 +1,18 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    领域层：数据模型、合并算法、HLC、墓碑 GC。
+    Domain layer: data models, merge algorithm, HLC, tombstone GC.
 
-    这是整个项目唯一需要反复精读的代码，也是唯一"必须能脱离 HTTP、
-    脱离磁盘被测试"的一层。因此它有一条硬约束：
+    The only code in the project that needs repeated close reading, and the only layer that
+    must be testable detached from HTTP and from disk. Hence one hard constraint:
 
-      **不依赖任何其他项目，也不依赖任何日志/IO 框架。**
+      **Depends on no other project, and on no logging/IO framework.**
 
-    输入输出都是值类型，没有 IO、没有时钟（时钟靠注入），所以 2000 多个
-    合并断言可以在毫秒内跑完 —— 而这正是合并算法敢被信任的原因。
+    Inputs and outputs are value types, no IO, no clock (clock is injected), so 2000+
+    merge assertions run in milliseconds — which is exactly why the merge algorithm can be trusted.
 
-    唯一的外部依赖是 Microsoft.Extensions.Logging.Abstractions 的 ILogger
-    接口。连它都可以再拿掉，代价是 store 层要自己抽象日志；目前不值得。
+    The only external dependency is the ILogger interface from Microsoft.Extensions.Logging.Abstractions.
+    Even that could be removed, at the cost of the store layer abstracting logging itself; not worth it yet.
   -->
 
   <PropertyGroup>

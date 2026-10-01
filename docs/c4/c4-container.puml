@@ -1,22 +1,22 @@
-' bmsync —— C4 Level 2：容器
-' 容器 = 独立部署/运行单元。bmsync 是约 20–30 MB 的 NativeAOT 单二进制。
+' bmsync — C4 Level 2: containers
+' Container = independently deployable/runnable unit. bmsync is a ~20-30 MB NativeAOT single binary.
 
 @startuml c4-container
 !include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
 
-title bmsync 容器（C4 Level 2）
+title bmsync containers (C4 Level 2)
 
-Person(user, "用户", "在两台 PC 的 Firefox 里点“立即同步”")
+Person(user, "User", "Clicks Sync now in Firefox on both PCs")
 
-Container(fx, "Firefox 扩展", "纯 ESM，无构建", "采集书签树 → POST /api/sync → 应用权威 state")
-Container(bmsync, "bmsync", ".NET 10 NativeAOT 单二进制，Kestrel", "合并（LWW+HLC）、鉴权、限流、落盘、快照")
-ContainerDb(data, "数据目录", "state.json / conflicts.json / history/", "权威状态 + 冲突环形缓冲(500) + 最近 30 份快照")
-Container(npm, "Nginx Proxy Manager", "用户已有", "TLS + client_max_body_size 32m")
+Container(fx, "Firefox extension", "Pure ESM, no build", "Collect bookmark tree -> POST /api/sync -> apply authoritative state")
+Container(bmsync, "bmsync", ".NET 10 NativeAOT single binary, Kestrel", "Merge (LWW+HLC), auth, rate limiting, persistence, snapshots")
+ContainerDb(data, "Data directory", "state.json / conflicts.json / history/", "Authoritative state + conflict ring buffer (500) + latest 30 snapshots")
+Container(npm, "Nginx Proxy Manager", "User-provided", "TLS + client_max_body_size 32m")
 
-Rel(user, fx, "点同步/配地址token", "")
+Rel(user, fx, "Click sync / configure address+token", "")
 Rel(fx, npm, "HTTPS", "")
 Rel(npm, bmsync, "HTTP", "127.0.0.1:8080")
-Rel(bmsync, data, "原子写/读", "tmp→fsync→rename")
+Rel(bmsync, data, "Atomic write/read", "tmp->fsync->rename")
 
-' 关键约束：合并只在 bmsync 里做一份实现；扩展只有采集/应用两个机械方向
+' Key constraint: merging is implemented in exactly one place inside bmsync; the extension only does the two mechanical directions: collect/apply
 @enduml

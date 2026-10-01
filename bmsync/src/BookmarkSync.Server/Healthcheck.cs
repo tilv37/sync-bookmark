@@ -5,33 +5,33 @@ using BookmarkSync.Domain;
 namespace BookmarkSync.Server;
 
 /// <summary>
-/// healthcheck 子命令。
+/// healthcheck subcommand.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 为什么需要它：最终镜像基于 FROM scratch，没有 shell 也没有 wget，
-/// 所以 healthcheck 只能用 exec 形式调用二进制自身：
+/// Why it exists: the final image is FROM scratch with no shell and no wget,
+/// so healthcheck can only exec the binary itself:
 /// </para>
 /// <code>
 /// healthcheck: ["CMD", "/bmsync", "healthcheck"]
 /// </code>
 /// <para>
-/// 它放在 Server 包而不是入口，是因为要读 BMSYNC_ADDR、
-/// 并且要能被单元测试直接调用 —— 放在 Program 的 Main 里就只能靠起真进程来测，
-/// 而这个逻辑恰恰值得测：测错了会表现为"容器明明活着却被反复重启"，
-/// 或者反过来"挂了还显示 healthy"。
+/// It lives in the Server package (not the entry point) because it reads BMSYNC_ADDR
+/// and must be unit-testable — inside Program.Main only real-process tests could cover it,
+/// yet this logic deserves tests: a wrong verdict shows as "a live container keeps restarting",
+/// or the reverse, "dead but still healthy".
 /// </para>
 /// <para>
-/// 退出码约定：
+/// Exit code contract:
 /// </para>
 /// <list type="bullet">
-/// <item>0 — 健康</item>
-/// <item>1 — 服务不可达 / 状态异常 / 响应不是本服务</item>
-/// <item>2 — 配置有问题（地址无法解析）—— 运维问题，跟服务健康无关</item>
+/// <item>0 — healthy</item>
+/// <item>1 — unreachable / bad state / response is not this service</item>
+/// <item>2 — bad config (address unparseable) — an ops problem, unrelated to service health</item>
 /// </list>
 /// <para>
-/// 校验 body 里的 service 字段是为了防一种坑：反代配错端口，请求被路由到
-/// 别的后端上，那个后端也返回 200。状态码过关但其实没人在服务。
+/// Checking the body service field guards against one pitfall: a reverse proxy with the
+/// wrong port routes the request to another backend that also returns 200.
 /// </para>
 /// </remarks>
 public static class Healthcheck
@@ -56,9 +56,9 @@ public static class Healthcheck
         string host = addr[..colon];
         string port = addr[(colon + 1)..];
 
-        // 容器里监听的是 0.0.0.0 / ::，但从容器内自请求要连回环地址。
-        // 不做这个替换的话，容器启动后第一轮 healthcheck 必然失败，
-        // 于是 K8s / compose 一直等，容器永远起不来。
+        // Inside a container the listener is 0.0.0.0 / ::, but self-requests must use loopback.
+        // Without this rewrite the first healthcheck after container start always fails,
+        // so K8s / compose waits forever and the container never comes up.
         if (host.Length == 0 || host is "0.0.0.0" or "::" or "[::]")
         {
             host = "127.0.0.1";
@@ -66,7 +66,7 @@ public static class Healthcheck
 
         if (host.Contains(':', StringComparison.Ordinal) && !host.StartsWith('['))
         {
-            host = "[" + host + "]"; // IPv6 字面量要加方括号
+            host = "[" + host + "]"; // IPv6 literals need brackets
         }
 
         string url = $"http://{host}:{port}/api/health";
@@ -82,13 +82,13 @@ public static class Healthcheck
                 return ExitUnhealthy;
             }
 
-            // 用 ApiJson.ParseHealth 而不是 JsonSerializer.Deserialize<HealthResponse>(s, options)：
-            // 后者带 [RequiresDynamicCode]，PublishAot 下报 IL3050。
+            // Use ApiJson.ParseHealth, not JsonSerializer.Deserialize<HealthResponse>(s, options):
+            // the latter carries [RequiresDynamicCode] and fails PublishAot with IL3050.
             //
-            // 另外 HealthResponse 是 Server 的类型，用 BmsyncJson.Storage 会抛
-            // "JsonTypeInfo metadata for type 'HealthResponse' was not provided"，
-            // 而这个异常会被吞成 exit 1 —— 症状是"服务明明健康却被判为不健康"，
-            // 指向完全错误的方向。
+            // HealthResponse is also a Server type, so BmsyncJson.Storage throws
+            // "JsonTypeInfo metadata for type 'HealthResponse' was not provided",
+            // and that exception collapses into exit 1 — a healthy service judged unhealthy,
+            // pointing in a completely wrong direction.
             var probe = ApiJson.ParseHealth(
                 resp.Content.ReadAsStringAsync().GetAwaiter().GetResult());
 

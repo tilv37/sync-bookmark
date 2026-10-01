@@ -1,28 +1,30 @@
 # syntax=docker/dockerfile:1
 #
-# 多阶段构建：编译（含测试）→ 最小运行时
+# Multi-stage build: compile (with tests) -> minimal runtime
 #
-# 最终镜像基于 scratch，约 20–30 MB（Go 版是 8–12 MB）。
-# 注意 scratch 没有 shell，所以 healthcheck 只能用 exec 形式调用
-# 二进制自身的子命令（见 docker-compose.yml）。
+# The final image is based on scratch, ~20-30 MB (the Go build was 8-12 MB).
+# Note scratch has no shell, so healthcheck can only exec-call the binary's
+# own subcommand (see docker-compose.yml).
 #
-# 构建上下文是仓库根（见 deploy/docker-compose.yml 的 build.context），
-# 所以路径都相对仓库根。向量文件 test/hlc_vectors.json 必须单独拷进来：
-# Domain 测试从二进制目录一路向上找 test/hlc_vectors.json（HlcTests.VectorsPath），
-# 保持 /src 下的相对布局与仓库一致，它才能找到。
+# The build context is the repo root (see build.context in
+# deploy/docker-compose.yml), so all paths are repo-root relative. The vector
+# file test/hlc_vectors.json must be copied in separately: the Domain tests
+# locate test/hlc_vectors.json by walking up from the binary dir
+# (HlcTests.VectorsPath), so keeping the /src layout identical to the repo is
+# what lets them find it.
 
-# ── 构建阶段 ──────────────────────────────────────────────────────────
+# ── Build stage ───────────────────────────────────────────────────────
 FROM mcr.microsoft.com/dotnet/sdk:10.0-noble AS build
 
-# NativeAOT 要调本地 C 链接器 Publish，而 SDK 镜像默认不带。
-# 放最前面单独成层：它和源码无关，不会因改代码而重装。
+# NativeAOT needs a local C linker for publish, and the SDK image lacks one.
+# First as its own layer: independent of sources, never reinstalled on code edits.
 RUN apt-get update && apt-get install -y --no-install-recommends clang zlib1g-dev \
     && rm -rf /var/lib/apt/lists
 
 WORKDIR /src
 
-# 依赖描述先拷，让 NuGet 层的缓存能跨源码改动复用。
-# .csproj 变了也要重下，所以把它们放在同一组。
+# Dependency manifests first, so the NuGet layer cache survives source edits.
+# .csproj changes also re-fetch, hence the same group.
 COPY bmsync/global.json bmsync/Directory.Build.props bmsync/Directory.Packages.props ./
 COPY bmsync/BookmarkSync.slnx ./
 COPY bmsync/src/BookmarkSync.Domain/BookmarkSync.Domain.csproj     src/BookmarkSync.Domain/
@@ -38,21 +40,23 @@ RUN dotnet restore
 COPY bmsync/ .
 COPY test/hlc_vectors.json ./test/hlc_vectors.json
 
-# 先跑测试，避免把坏镜像推上去。
+# Test first so a broken image is never pushed.
 #
-# 刻意在**测试之后**才 publish：反过来的话，一份编译不过的代码会先花几分钟
-# 做 NativeAOT 编译，然后才在测试步骤失败 —— 而 NativeAOT 编译是这个项目里
-# 最慢的一步，顺序反了会让每次改坏代码都白等它。
+# Deliberately **after** tests comes publish: reversed, broken code would
+# first spend minutes on NativeAOT compilation and only then fail the tests —
+# and NativeAOT is the slowest step here, so reversed order wastes the wait
+# on every broken edit.
 RUN dotnet test -c Release --nologo
 
-# NativeAOT：产物不再需要 .so / libicu / libssl，这是 FROM scratch 唯一可行的方式。
+# NativeAOT: the artifact no longer needs .so / libicu / libssl — the only way
+# FROM scratch works.
 #
-# -p:PublishAot=true 必须在这里传（而不是写死在 csproj 里）：它要 C++ 链接器，
-# 且**不能交叉编译** —— 在 Windows 上 publish -r linux-x64 + AOT 会报
-# "Cross-OS native compilation is not supported"。所以 AOT 只能在这个
-# Linux 容器里做，开发机上的 `dotnet test` 不受它影响。
+# -p:PublishAot=true is passed here (never hardcoded in csproj): it needs a
+# C++ linker and **cannot cross-compile** — publish -r linux-x64 + AOT on
+# Windows fails with "Cross-OS native compilation is not supported". So AOT
+# only happens in this Linux container; `dotnet test` on dev machines is unaffected.
 #
-# AssemblyName 是 bmsync（见 Cli.csproj），healthcheck 依赖这个名字。
+# AssemblyName is bmsync (see Cli.csproj); healthcheck relies on that name.
 RUN dotnet publish src/BookmarkSync.Cli \
         -c Release \
         -r linux-x64 \
@@ -60,20 +64,21 @@ RUN dotnet publish src/BookmarkSync.Cli \
         -p:InvariantGlobalization=true \
         --output /out
 
-# ── 运行阶段 ──────────────────────────────────────────────────────────
-# 保持 FROM scratch（约 20MB 级），但 NativeAOT 产物并非全静态：
-# 它仍动态链接 glibc（ld-linux + libc.so.6 + libm.so.6），scratch 里
-# 一个都没有就会报 "exec /bmsync: no such file or directory"。
-# 所以把这三个文件与二进制一起拷进来。路径是 Debian(noble) 的固定布局，
-# 与构建阶段同一镜像，升级基础镜像后若路径变化，构建会直接失败，
-# 不会静默产出一个起不来的镜像。
+# ── Runtime stage ─────────────────────────────────────────────────────
+# Keep FROM scratch (~20MB class), but the NativeAOT artifact is not fully
+# static: it still links glibc dynamically (ld-linux + libc.so.6 +
+# libm.so.6), and scratch ships none of them — without copies the container
+# fails with "exec /bmsync: no such file or directory".
+# So copy those three files with the binary. Paths are Debian (noble)'s fixed
+# layout from the same image as the build stage; a base-image upgrade that
+# moves them fails the build instead of silently shipping a dead image.
 FROM scratch
 
 COPY --from=build /lib64/ld-linux-x86-64.so.2 /lib64/ld-linux-x86-64.so.2
 COPY --from=build /lib/x86_64-linux-gnu/libc.so.6 /lib/x86_64-linux-gnu/libm.so.6 /lib/x86_64-linux-gnu/
 COPY --from=build /out/bmsync /bmsync
 
-# state.json / conflicts.json / history/ 都落在这里
+# state.json / conflicts.json / history/ all land here
 VOLUME ["/data"]
 EXPOSE 8080
 

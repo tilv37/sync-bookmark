@@ -2,76 +2,77 @@ using System.Text.Json.Serialization;
 
 namespace BookmarkSync.Domain;
 
-/// <summary>item 的类型。</summary>
+/// <summary>Item type.</summary>
 public static class ItemTypes
 {
-    /// <summary>书签：有 URL。</summary>
+    /// <summary>Bookmark: has a URL.</summary>
     public const string Bookmark = "b";
 
-    /// <summary>文件夹：无 URL。</summary>
+    /// <summary>Folder: no URL.</summary>
     public const string Folder = "f";
 }
 
 /// <summary>
-/// 同步的最小单位，对应一个书签或一个文件夹。
+/// Smallest unit of sync: one bookmark or one folder.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 字段名用单字母是因为体积：5000 个书签的 JSON 用全字段名约 1.1 MB，
-/// 用短名约 800 KB，而每次同步都是全量传输。
+/// Single-letter field names exist to save bytes: 5000 bookmarks take ~1.1 MB
+/// with full names vs ~800 KB with short names, and every sync ships the full state.
 /// </para>
 /// <para>
-/// 用 <c>readonly record struct</c> 而不是 class：合并算法里有
-/// <c>s == winner</c> 这种判断，依赖 Go 原实现里"值类型、== 即全字段相等"
-/// 的语义。record struct 自动提供值相等与 <c>==</c>，换成 class 的话所有
-/// 引用相等判断都会静默变成"永远相等"，统计与冲突判定会一起错掉。
+/// A <c>readonly record struct</c> (not a class): the merge algorithm relies on
+/// <c>s == winner</c> meaning field-by-field equality, matching the Go
+/// implementation's value-type semantics. A record struct provides value equality
+/// and <c>==</c> for free; with a class every reference comparison would silently
+/// report "always equal" and corrupt stats and conflict detection together.
 /// </para>
 /// </remarks>
 public readonly record struct Item
 {
-    /// <summary>parent key（父目录）；顶层 item 为四个根目录 id 之一。</summary>
+    /// <summary>Parent key; top-level items use one of the four root folder ids.</summary>
     [JsonPropertyName("p")]
     [JsonPropertyOrder(0)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string P { get; init; }
 
-    /// <summary>类型，见 <see cref="ItemTypes"/>。</summary>
+    /// <summary>Type, see <see cref="ItemTypes"/>.</summary>
     [JsonPropertyName("t")]
     [JsonPropertyOrder(1)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string T { get; init; }
 
-    /// <summary>标题 / 文件夹名。</summary>
+    /// <summary>Title / folder name.</summary>
     [JsonPropertyName("n")]
     [JsonPropertyOrder(2)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string N { get; init; }
 
-    /// <summary>URL，仅书签有。</summary>
+    /// <summary>URL, bookmarks only.</summary>
     [JsonPropertyName("u")]
     [JsonPropertyOrder(3)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string U { get; init; }
 
-    /// <summary>HLC：创建时间，不参与合并。</summary>
+    /// <summary>HLC: creation time, excluded from merge comparisons.</summary>
     [JsonPropertyName("a")]
     [JsonPropertyOrder(4)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string A { get; init; }
 
-    /// <summary>HLC：最后修改时间 —— LWW 的唯一比较依据。</summary>
+    /// <summary>HLC: last-modified time, the sole input to LWW comparison.</summary>
     [JsonPropertyName("m")]
     [JsonPropertyOrder(5)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string M { get; init; }
 
-    /// <summary>deleted：墓碑标记。</summary>
+    /// <summary>Deleted flag (tombstone marker).</summary>
     [JsonPropertyName("d")]
     [JsonPropertyOrder(6)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public bool D { get; init; }
 
-    /// <summary>deletedAt：删除的墙钟毫秒，仅用于 GC 判定。</summary>
+    /// <summary>DeletedAt: wall-clock millis of deletion, used only for GC decisions.</summary>
     [JsonPropertyName("x")]
     [JsonPropertyOrder(7)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
@@ -79,25 +80,25 @@ public readonly record struct Item
 }
 
 /// <summary>
-/// 四个 Firefox 系统根目录的固定 id。
+/// Fixed ids of the four Firefox system root folders.
 /// </summary>
 /// <remarks>
-/// 这些 id 在 Firefox 各版本与各语言界面下都是稳定的，因此可以安全地
-/// 直接当作顶层 item 的 parent key 使用 —— 跨设备、跨语言都不需要映射表。
-/// 见 docs/design.md §3.4。
+/// These ids are stable across Firefox versions and UI languages, so they can be
+/// used directly as parent keys of top-level items with no per-device mapping table.
+/// See docs/architecture.md §2.
 /// </remarks>
 public static class RootFolders
 {
-    /// <summary>书签栏。</summary>
+    /// <summary>Bookmarks toolbar.</summary>
     public const string Toolbar = "toolbar_____";
 
-    /// <summary>菜单。</summary>
+    /// <summary>Bookmarks menu.</summary>
     public const string Menu = "menu________";
 
-    /// <summary>其他书签。</summary>
+    /// <summary>Other bookmarks.</summary>
     public const string Unfiled = "unfiled_____";
 
-    /// <summary>移动设备书签（默认不同步）。</summary>
+    /// <summary>Mobile bookmarks (excluded from sync by default).</summary>
     public const string Mobile = "mobile______";
 
     private static readonly HashSet<string> All = new(StringComparer.Ordinal)
@@ -108,71 +109,73 @@ public static class RootFolders
     public static bool IsRootFolder(string? key) => key is not null && All.Contains(key);
 }
 
-/// <summary>持久化格式的版本常量。</summary>
+/// <summary>Version constants for the persisted format.</summary>
 /// <remarks>
-/// 版本不匹配时服务<b>拒绝启动</b>而非自动迁移：书签是用户不可再生的数据，
-/// 静默改写它的风险远大于「升级后手工处理一次」的麻烦。见 docs/design.md §8.7。
+/// On a version mismatch the service <b>refuses to start</b> instead of migrating:
+/// bookmarks are irreplaceable user data, and silently rewriting them is riskier
+/// than asking for one manual upgrade step. See docs/architecture.md §6.
 /// <para>
-/// 放在静态类里而不是命名空间层级：C# 不允许命名空间层级出现
-/// <c>public const</c> 成员，只能是类型。
+/// Kept in a static class rather than at namespace level: C# does not allow
+/// <c>public const</c> members at namespace scope, only on types.
 /// </para>
 /// </remarks>
 public static class Schema
 {
-    /// <summary>state.json / /api/sync 请求体的 schema 版本。</summary>
+    /// <summary>Schema version of state.json / /api/sync bodies.</summary>
     public const int Version = 1;
 }
 
-/// <summary>一份 state 的校验结果。</summary>
+/// <summary>Validation outcome for one state.</summary>
 /// <remarks>
-/// 对应 Go 版返回的 <c>([]string, error)</c>。分成"硬错误"与"软警告"两级的
-/// 理由见 <see cref="State.Validate"/>。
+/// Mirrors the Go version's <c>([]string, error)</c>. The hard-error vs soft-warning
+/// split is explained on <see cref="State.Validate"/>.
 /// </remarks>
 public readonly record struct ValidationResult(IReadOnlyList<string> Warnings, string? Error)
 {
-    /// <summary>是否通过硬校验。</summary>
+    /// <summary>Whether hard validation passed.</summary>
     public bool IsValid => Error is null;
 
     public static ValidationResult Ok(IReadOnlyList<string> warnings) => new(warnings, null);
 
-    /// <summary>硬错误：直接拒绝这份上传，不给任何软警告。</summary>
+    /// <summary>Hard error: reject the upload outright with no soft warnings.</summary>
     public static ValidationResult Fail(string error) =>
         new(Array.Empty<string>(), error);
 }
 
-/// <summary>完整的同步状态，即 state.json 的内存表示。</summary>
+/// <summary>A full sync state: the in-memory form of state.json.</summary>
 public sealed class State
 {
-    /// <summary>schema 版本。</summary>
+    /// <summary>Schema version.</summary>
     [JsonPropertyName("v")]
     [JsonPropertyOrder(0)]
     public int V { get; init; } = Schema.Version;
 
-    /// <summary>服务端权威 HLC，客户端用它校准本地时钟。</summary>
+    /// <summary>Authoritative server HLC; clients use it to calibrate their clocks.</summary>
     /// <remarks>
-    /// C# 属性名是 <c>Clock</c> 而 wire 名是 <c>hlc</c>：若把属性也叫
-    /// <c>Hlc</c>，它会和 <see cref="Hlc"/> 类在 State 的作用域内打架 ——
-    /// 成员查找优先于类型查找，<c>Hlc.Zero</c> 会被解析成"访问这个字符串
-    /// 属性的 Zero"，而字符串没有 Zero，得到的是一个让人一头雾水的编译错误。
-    /// wire 名保持 <c>hlc</c> 不变，协议完全不受影响。
+    /// The C# property is <c>Clock</c> while the wire name is <c>hlc</c>: naming the
+    /// property <c>Hlc</c> would collide with the <see cref="Hlc"/> class in
+    /// State's scope — member lookup wins over type lookup, so <c>Hlc.Zero</c>
+    /// would resolve to "member Zero of this string property", which does not
+    /// exist. The wire name stays <c>hlc</c>, so the protocol is unaffected.
     /// </remarks>
     [JsonPropertyName("hlc")]
     [JsonPropertyOrder(1)]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
     public string Clock { get; init; } = string.Empty;
 
-    /// <summary>key → item。</summary>
+    /// <summary>Key -&gt; item.</summary>
     [JsonPropertyName("items")]
     [JsonPropertyOrder(2)]
     public Dictionary<string, Item> Items { get; init; } = NewItemsDictionary();
 
     /// <summary>
-    /// 创建一个空字典，比较器固定为 <see cref="StringComparer.Ordinal"/>。
+    /// Create an empty dictionary with an <see cref="StringComparer.Ordinal"/> comparer.
     /// </summary>
     /// <remarks>
-    /// 必须显式指定：Go 的 map 按字节比较字符串键，.NET 的默认字符串比较器
-    /// 虽然也是序数比较，但依赖默认值意味着"哪天有人改了 CultureInfo
-    /// 就会悄悄改变排序"，而合并算法的确定性依赖 key 序。
+    /// Specified explicitly: Go maps compare string keys byte-wise, and while the
+    /// .NET default string comparer is also ordinal, relying on the default leaves
+    /// ordering at the mercy of a future CultureInfo change. Merge determinism
+    /// depends on key order.
     /// </remarks>
     public static Dictionary<string, Item> NewItemsDictionary() =>
         new(StringComparer.Ordinal);
@@ -180,27 +183,28 @@ public sealed class State
     public static State New() => new();
 
     /// <summary>
-    /// 返回一份只有 <see cref="Clock"/> 不同、Items 字典<b>共享</b>的副本。
+    /// Return a copy that differs only in <see cref="Clock"/>, <b>sharing</b> the Items dictionary.
     /// </summary>
     /// <remarks>
-    /// 为什么不是 <c>with</c> 表达式：<c>State</c> 是普通 class 而不是 record。
-    /// 改成 record 看起来更"现代"，但 record 会自动生成基于字段的 Equals，
-    /// 而 Items 是 <c>Dictionary</c> —— 默认比较器对它做的是<b>引用</b>比较，
-    /// 于是两个内容完全相同、字典却是不同对象的 State 会判为不等。
-    /// 那正是合并测试里 <c>sameStates</c> 一直在做的事，踩中了这个坑会
-    /// 让"幂等性"这类断言莫名其妙地失败，且原因极难定位。
+    /// Not a <c>with</c> expression because <c>State</c> is a plain class, not a record.
+    /// A record would auto-generate field-based Equals, but Items is a
+    /// <c>Dictionary</c> — compared by <b>reference</b> — so two States with equal
+    /// contents but different dictionary objects would compare unequal. That is
+    /// exactly what the merge tests assert with <c>sameStates</c>, so the record
+    /// form would break "idempotency" assertions in hard-to-diagnose ways.
     /// <para>
-    /// Items 共享在这里是安全的：调用方（store.SyncAsync）拿到副本后不会
-    /// 再往字典里写，它只是换一个 Clock 就要落盘。
+    /// Sharing Items is safe here: the caller (store.SyncAsync) never writes into
+    /// the dictionary afterwards; it only swaps the Clock before persisting.
     /// </para>
     /// </remarks>
     public State WithClock(string clock) => new() { V = V, Clock = clock, Items = Items };
 
-    /// <summary>返回一份深拷贝。</summary>
+    /// <summary>Return a deep copy.</summary>
     /// <remarks>
-    /// 为什么必须深拷贝：合并会把 server 与 incoming 的 item 放进结果字典。
-    /// <see cref="Item"/> 是值类型，拷贝本身安全；真正危险的是<b>字典本身</b>
-    /// 被共享 —— 后续若有人就地修改结果，会连带污染服务端状态。所以连字典一起复制。
+    /// The copy must be deep: the merge places server and incoming items into the
+    /// result dictionary. <see cref="Item"/> is a value type so copying it is safe;
+    /// the real hazard is <b>sharing the dictionary itself</b> — a later in-place
+    /// edit of the result would also corrupt server state. So the dictionary is copied too.
     /// </remarks>
     public State Clone()
     {
@@ -213,10 +217,11 @@ public sealed class State
         return new State { V = V, Clock = Clock, Items = copy };
     }
 
-    /// <summary>本 state 中最大的 HLC（扫描所有 a 与 m 字段）。</summary>
+    /// <summary>Largest HLC in this state (scans every a and m field).</summary>
     /// <remarks>
-    /// 服务端在处理一次同步后用它推进自己的 HLC，从而保证服务端发出的
-    /// 时间戳一定大于它见过的所有客户端时间戳。见 docs/design.md §6.4。
+    /// After each sync the server advances its own HLC past this value, so every
+    /// timestamp it emits stays ahead of any client timestamp it has seen.
+    /// See docs/architecture.md §5.
     /// </remarks>
     public string MaxHlc()
     {
@@ -237,7 +242,7 @@ public sealed class State
         return output;
     }
 
-    /// <summary>活跃（非墓碑）item 数。</summary>
+    /// <summary>Number of live (non-tombstone) items.</summary>
     public int CountActive()
     {
         int n = 0;
@@ -252,10 +257,11 @@ public sealed class State
         return n;
     }
 
-    /// <summary>全部 key 的升序切片。</summary>
+    /// <summary>All keys in ascending order.</summary>
     /// <remarks>
-    /// 确定性很重要：合并遍历字典的顺序取决于插入顺序，而冲突列表、
-    /// HLC 碰撞时的兜底决胜都依赖顺序稳定，否则同样的输入会产生不同的输出。
+    /// Determinism matters: dictionary traversal order depends on insertion order,
+    /// while the conflict list and the HLC-collision tiebreak both need a stable
+    /// order, or identical inputs could produce different outputs.
     /// </remarks>
     public string[] KeysSorted()
     {
@@ -265,8 +271,8 @@ public sealed class State
         return keys;
     }
 
-    /// <summary>key 所在位置的深度（根目录的直接子项深度为 1）。</summary>
-    /// <returns>深度；父链异常时返回 -1 并通过 <paramref name="error"/> 给出原因。</returns>
+    /// <summary>Depth of the given key (a direct child of a root folder has depth 1).</summary>
+    /// <returns>Depth; -1 with a reason in <paramref name="error"/> when the parent chain is broken.</returns>
     public int DepthOf(string key, out string? error)
     {
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -277,7 +283,7 @@ public sealed class State
         {
             if (!Items.TryGetValue(cur, out Item it))
             {
-                error = $"父节点 {cur} 缺失";
+                error = $"missing parent {cur}";
                 return -1;
             }
 
@@ -289,7 +295,7 @@ public sealed class State
 
             if (!seen.Add(cur))
             {
-                error = "父链成环";
+                error = "parent cycle detected";
                 return -1;
             }
 
@@ -298,28 +304,29 @@ public sealed class State
 
             if (depth > Limits.MaxDepth + 1)
             {
-                // 提前退出，避免构造出的长链让 DepthOf 跑很久
-                error = $"父链超过 {Limits.MaxDepth + 1} 层";
+                // Bail out early so a crafted long chain cannot make DepthOf run for long.
+                error = $"parent chain exceeds {Limits.MaxDepth + 1} levels";
                 return depth;
             }
         }
     }
 
-    /// <summary>校验一份 state 是否可以安全参与合并。</summary>
+    /// <summary>Check whether a state is safe to merge.</summary>
     /// <remarks>
-    /// 严格程度是刻意分级的：
+    /// Strictness is deliberately tiered:
     /// <list type="bullet">
     /// <item>
-    /// <b>硬错误</b>（<see cref="ValidationResult.Error"/> 非空）：会导致解析出错
-    /// 或资源失控的问题 —— 版本不符、key 格式非法、类型非法、HLC 格式非法、
-    /// 超出数量/深度/长度上限。这些情况说明输入损坏或恶意，必须拒绝。
+    /// <b>Hard errors</b> (<see cref="ValidationResult.Error"/> set): inputs that would
+    /// break parsing or blow up resources — version mismatch, malformed keys, bad types,
+    /// malformed HLCs, over-limit counts/depths/lengths. Such input is corrupt or
+    /// hostile and must be rejected.
     /// </item>
     /// <item>
-    /// <b>软警告</b>（<see cref="ValidationResult.Warnings"/>，不阻断）：树结构层面的
-    /// 问题 —— 父节点缺失、父节点不是文件夹、存在环。这些理论上不该出现
-    /// （采集端总是从真实的 Firefox 树生成，父节点必然存在），但一旦出现，
-    /// 让整份上传被拒会非常挫伤用户。改为记录警告，由 apply 阶段做兜底
-    /// （父节点找不到就跳过该 item）。
+    /// <b>Soft warnings</b> (<see cref="ValidationResult.Warnings"/>, non-blocking): tree
+    /// problems — missing parents, non-folder parents, cycles. These should never happen
+    /// (collectors always build from a real Firefox tree, so parents must exist), but
+    /// rejecting a whole upload over them would be harsh. They are logged as warnings
+    /// and the apply phase skips the affected items as a fallback.
     /// </item>
     /// </list>
     /// </remarks>
@@ -329,19 +336,19 @@ public sealed class State
 
         if (V != Schema.Version)
         {
-            return ValidationResult.Fail($"schema 版本不符：期望 {Schema.Version}，收到 {V}");
+            return ValidationResult.Fail($"schema version mismatch: expected {Schema.Version}, got {V}");
         }
 
         if (Items.Count > Limits.MaxItems)
         {
-            return ValidationResult.Fail($"item 数量 {Items.Count} 超过上限 {Limits.MaxItems}");
+            return ValidationResult.Fail($"item count {Items.Count} exceeds limit {Limits.MaxItems}");
         }
 
         foreach ((string key, Item it) in Items)
         {
             if (key.Length != Limits.KeyLen || !IsHex(key))
             {
-                return ValidationResult.Fail($"item key 非法：\"{key}\"（期望 {Limits.KeyLen} 位十六进制）");
+                return ValidationResult.Fail($"invalid item key: \"{key}\" (expected {Limits.KeyLen} hex chars)");
             }
 
             switch (it.T)
@@ -349,13 +356,13 @@ public sealed class State
                 case ItemTypes.Bookmark:
                     if (string.IsNullOrEmpty(it.U))
                     {
-                        return ValidationResult.Fail($"item {key}：书签必须有 url");
+                        return ValidationResult.Fail($"item {key}: bookmark must have url");
                     }
 
                     if (it.U.Length > Limits.MaxUrlLen)
                     {
                         return ValidationResult.Fail(
-                            $"item {key}：url 长度 {it.U.Length} 超过上限 {Limits.MaxUrlLen}");
+                            $"item {key}: url length {it.U.Length} exceeds limit {Limits.MaxUrlLen}");
                     }
 
                     break;
@@ -363,78 +370,79 @@ public sealed class State
                 case ItemTypes.Folder:
                     if (!string.IsNullOrEmpty(it.U))
                     {
-                        return ValidationResult.Fail($"item {key}：文件夹不应有 url");
+                        return ValidationResult.Fail($"item {key}: folder must not have url");
                     }
 
                     break;
 
                 default:
-                    return ValidationResult.Fail($"item {key}：类型非法 \"{it.T}\"");
+                    return ValidationResult.Fail($"item {key}: invalid type \"{it.T}\"");
             }
 
             if (it.N is not null && it.N.Length > Limits.MaxTitleLen)
             {
                 return ValidationResult.Fail(
-                    $"item {key}：标题长度 {it.N.Length} 超过上限 {Limits.MaxTitleLen}");
+                    $"item {key}: title length {it.N.Length} exceeds limit {Limits.MaxTitleLen}");
             }
 
             if (!Hlc.TryDecode(it.M, out _, out _))
             {
-                return ValidationResult.Fail($"item {key}：m 字段不是合法 HLC：\"{it.M}\"");
+                return ValidationResult.Fail($"item {key}: field m is not a valid HLC: \"{it.M}\"");
             }
 
             if (!string.IsNullOrEmpty(it.A) && !Hlc.TryDecode(it.A, out _, out _))
             {
-                return ValidationResult.Fail($"item {key}：a 字段不是合法 HLC：\"{it.A}\"");
+                return ValidationResult.Fail($"item {key}: field a is not a valid HLC: \"{it.A}\"");
             }
 
             if (it.D && it.X == 0)
             {
-                warnings.Add($"item {key} 是墓碑但缺少删除时间 x");
+                warnings.Add($"item {key} is a tombstone but missing deletion time x");
             }
         }
 
-        // 树结构检查
+        // Tree-structure checks.
         foreach ((string key, Item it) in Items)
         {
             if (RootFolders.IsRootFolder(it.P))
             {
-                continue; // 顶层 item，父为系统根目录，正常
+                continue; // Top-level item whose parent is a system root: fine.
             }
 
             if (!Items.TryGetValue(it.P, out Item parent))
             {
-                warnings.Add($"item {key} 的父节点 {it.P} 不存在");
+                warnings.Add($"item {key} parent {it.P} does not exist");
                 continue;
             }
 
             if (parent.T != ItemTypes.Folder)
             {
-                warnings.Add($"item {key} 的父节点 {it.P} 不是文件夹");
+                warnings.Add($"item {key} parent {it.P} is not a folder");
                 continue;
             }
 
-            // 父节点是墓碑而子节点存活，一定是状态不一致：apply 阶段无法把它
-            // 挂到任何地方。记录下来但继续（该 item 在 apply 时会被安全跳过）。
+            // A live child under a tombstoned parent is always inconsistent: the apply
+            // phase cannot attach it anywhere. Record it and move on (the item is
+            // safely skipped during apply).
             if (parent.D && !it.D)
             {
-                warnings.Add($"item {key} 存活但父节点 {it.P} 已删除");
+                warnings.Add($"item {key} is alive but parent {it.P} is deleted");
             }
         }
 
-        // 深度检查（带环检测，防御性：损坏数据可能构造出环导致死循环）
+        // Depth check (with cycle detection: corrupt data could otherwise loop forever).
         foreach (string key in Items.Keys)
         {
             int d = DepthOf(key, out string? err);
             if (err is not null)
             {
-                warnings.Add($"item {key} 的父链异常：{err}");
+                warnings.Add($"item {key} has broken parent chain: {err}");
                 continue;
             }
 
             if (d > Limits.MaxDepth)
             {
-                return ValidationResult.Fail($"item {key} 深度 {d} 超过上限 {Limits.MaxDepth}");
+                return ValidationResult.Fail($"item {key} depth {d} exceeds limit {Limits.MaxDepth}");
             }
         }
 

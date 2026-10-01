@@ -4,7 +4,7 @@ using System.Text.Json.Serialization;
 namespace BookmarkSync.Domain.Tests;
 
 /// <summary>
-/// 可手工推进的时钟，让 HLC 测试完全确定、不依赖真实时间。
+/// A manually advanced clock keeping HLC tests fully deterministic, independent of wall time.
 /// </summary>
 internal sealed class FixedClock
 {
@@ -24,24 +24,24 @@ internal sealed class FixedClock
 }
 
 /// <summary>
-/// HLC 的单元测试。服务端从 Go 迁到 .NET 10 时逐条移植，
-/// 当时用来对照的 Go 实现（legacy-go/）在迁移确认后已删除。
+/// Unit tests for HLC, ported one by one when the server moved from Go to .NET 10;
+/// the Go reference used for comparison (legacy-go/) was deleted once migration was verified.
 /// </summary>
 public class HlcTests
 {
-    // ── 编码 ──────────────────────────────────────────────────────────
+    // ── Encoding ────────────────────────────────────────────────────────
 
     [Theory]
     [InlineData(0L, 0, "0000000000000-00000")]
     [InlineData(1000L, 0, "0000000001000-00000")]
     [InlineData(1000L, 42, "0000000001000-00042")]
     [InlineData(1790000000000L, 99999, "1790000000000-99999")]
-    [InlineData(9223372036854L, 1, "9223372036854-00001")] // 13 位上限
-    public void Encode_格式固定宽度(long l, int c, string want) =>
+    [InlineData(9223372036854L, 1, "9223372036854-00001")] // 13-digit cap
+    public void Encode_FixedWidthFormat(long l, int c, string want) =>
         Assert.Equal(want, Hlc.Encode(l, c));
 
     [Fact]
-    public void Decode_往返无损()
+    public void Decode_RoundTripsLosslessly()
     {
         var rnd = new Random(1);
         for (int i = 0; i < 2000; i++)
@@ -50,7 +50,7 @@ public class HlcTests
             int c = rnd.Next(100_000);
             string s = Hlc.Encode(l, c);
 
-            Assert.True(Hlc.TryDecode(s, out long gl, out int gc), $"Decode({s}) 失败");
+            Assert.True(Hlc.TryDecode(s, out long gl, out int gc), $"Decode({s}) failed");
             Assert.Equal(l, gl);
             Assert.Equal(c, gc);
         }
@@ -64,39 +64,39 @@ public class HlcTests
     [InlineData("0000000001000_00000")]
     [InlineData("0000000001000-0000x")]
     [InlineData("abc-00000")]
-    [InlineData("0000000001000-999999")] // 6 位计数
+    [InlineData("0000000001000-999999")] // 6-digit counter
     [InlineData("-0000000001000-00000")]
-    public void Decode_拒绝垃圾输入(string s)
+    public void Decode_RejectsGarbageInput(string s)
     {
-        Assert.False(Hlc.TryDecode(s, out _, out _), $"Decode({s}) 应当失败");
-        Assert.False(Hlc.IsValid(s), $"IsValid({s}) 应当为 false");
+        Assert.False(Hlc.TryDecode(s, out _, out _), $"Decode({s}) should fail");
+        Assert.False(Hlc.IsValid(s), $"IsValid({s}) should be false");
     }
 
     [Theory]
-    // 下面两个是实测确认过的分歧点，不是假想：
-    // .NET 的 int.TryParse 默认样式会接受正负号与前后空白，
-    // 而 Go 的 ParseUint 全部拒绝。若不做特殊处理，两套实现
-    // 会对同一串输入给出不同判断，且分歧点在"非法输入"这条
-    // 恰恰最该严格的路径上。
+    // The next two are measured divergences, not hypothetical:
+    // .NET int.TryParse default styles accept signs and surrounding whitespace,
+    // while Go ParseUint rejects all of them. Without special handling the two builds
+    // would judge the same input differently — on the "invalid input" path that most
+    // needs strictness.
     [InlineData("+000000001000-00000")]
     [InlineData(" 000000001000-00000")]
     [InlineData("000000001000-0000 ")]
     [InlineData("00000000+1000-00000")]
-    public void Decode_拒绝正负号与空白(string s) =>
-        Assert.False(Hlc.TryDecode(s, out _, out _), $"Decode({s}) 应当失败（Go 侧同样拒绝）");
+    public void Decode_RejectsSignsAndWhitespace(string s) =>
+        Assert.False(Hlc.TryDecode(s, out _, out _), $"Decode({s}) should fail (Go side rejects it too)");
 
     /// <summary>
-    /// 字典序 == 时间序。这是整个编码格式存在的理由：合并时可以在任何语言、
-    /// 任何数据结构里直接比较字符串，不需要解析。
+    /// Lexicographic order == time order. The whole point of the encoding: merges can compare
+    /// strings directly in any language or data structure, no parsing needed.
     /// </summary>
     [Fact]
-    public void 字符串序等于时间序()
+    public void StringOrderEqualsTimeOrder()
     {
         var rnd = new Random(2);
         var enc = new List<string>(1000);
         for (int i = 0; i < 1000; i++)
         {
-            // 刻意让大量样本落在同一毫秒内，逼出「物理部分相同、只比计数」的路径
+            // Deliberately cluster many samples in one millisecond to force the "same physical part, counter only" path
             enc.Add(Hlc.Encode(1_000_000_000_000L + rnd.Next(5), rnd.Next(100_000)));
         }
 
@@ -105,14 +105,14 @@ public class HlcTests
         {
             Assert.True(
                 Hlc.Compare(enc[i - 1], enc[i]) <= 0,
-                $"排序后仍不单调: \"{enc[i - 1]}\"({i - 1}) > \"{enc[i]}\"({i})");
+                $"not monotonic after sort: \"{enc[i - 1]}\"({i - 1}) > \"{enc[i]}\"({i})");
         }
     }
 
-    // ── 单调性与归零 ──────────────────────────────────────────────────
+    // ── Monotonicity and reset ────────────────────────────────────────────
 
     [Fact]
-    public void Now_严格单调()
+    public void Now_IsStrictlyMonotonic()
     {
         var clk = new FixedClock(1_000_000_000_000L);
         Hlc h = Hlc.NewWithClock(clk.Now);
@@ -121,13 +121,13 @@ public class HlcTests
         for (int i = 0; i < 1000; i++)
         {
             string cur = h.Now();
-            Assert.True(Hlc.Compare(cur, prev) > 0, $"第 {i} 次 Now() 未递增: \"{prev}\" 之后是 \"{cur}\"");
+            Assert.True(Hlc.Compare(cur, prev) > 0, $"Now() #{i} did not advance: \"{prev}\" followed by \"{cur}\"");
             prev = cur;
         }
     }
 
     [Fact]
-    public void Now_进入新毫秒后计数归零()
+    public void Now_ResetsCounterOnNewMillisecond()
     {
         var clk = new FixedClock(1000);
         Hlc h = Hlc.NewWithClock(clk.Now);
@@ -140,7 +140,7 @@ public class HlcTests
     }
 
     [Fact]
-    public void 逻辑计数溢出进位到物理部分()
+    public void LogicalCounterOverflowCarriesIntoPhysicalPart()
     {
         var clk = new FixedClock(1000);
         Hlc h = Hlc.NewWithClock(clk.Now);
@@ -149,20 +149,20 @@ public class HlcTests
         string[] seq = [h.Now(), h.Now(), h.Now(), h.Now(), h.Now()];
         for (int i = 1; i < seq.Length; i++)
         {
-            Assert.True(Hlc.Compare(seq[i - 1], seq[i]) <= 0, $"溢出附近未单调: \"{seq[i - 1]}\" → \"{seq[i]}\"");
+            Assert.True(Hlc.Compare(seq[i - 1], seq[i]) <= 0, $"not monotonic near overflow: \"{seq[i - 1]}\" → \"{seq[i]}\"");
             Assert.Equal(19, seq[i].Length);
         }
 
         Assert.StartsWith("0000000001001-", seq[^1], StringComparison.Ordinal);
     }
 
-    // ── 因果性：HLC 存在的全部理由 ─────────────────────────────────────
+    // ── Causality: the entire reason HLC exists ─────────────────────────
     //
-    // docs/design.md §6.1：一旦这些测试失败，就意味着「两台机器时钟有偏差会
-    // 静默丢书签」这个最初的问题重新出现了。
+    // docs/architecture.md §5: if these tests fail, the original problem — "clock skew between
+    // two machines silently drops bookmarks" — is back.
 
     [Fact]
-    public void 跨设备因果性()
+    public void CausalityAcrossDevices()
     {
         Hlc a = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L).Now);
         Hlc b = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L).Now);
@@ -179,24 +179,24 @@ public class HlcTests
             string got = b.Now();
             Assert.True(
                 Hlc.Compare(got, last) > 0,
-                $"B 的第 {i} 个后续事件 \"{got}\" 未大于 A 的 \"{last}\" —— 因果性被破坏");
+                $"B follow-up event #{i} \"{got}\" not greater than A \"{last}\" — causality violated");
         }
     }
 
     /// <summary>
-    /// 本项目曾经写错、并在写测试时才发现的那个分支。
+    /// The branch this project once got wrong and only caught while writing tests.
     /// </summary>
     /// <remarks>
-    /// 场景：A 在第 1000ms 内产生 6 个事件，最后一个是 (1000, 00005)。
-    /// 接收方 B 的物理时钟恰好也是 1000ms，但自身逻辑计数为 0。
+    /// Scenario: A produces 6 events within ms 1000, the last being (1000, 00005).
+    /// Receiver B's physical clock is also exactly 1000ms, with its own logical counter at 0.
     /// <para>
-    /// 错误写法（Update 的第三个分支写成 "max == p 则 c = 0"）会让 B 得到
-    /// (1000, 0)，其后的 Now() 产生 (1000, 1) &lt; (1000, 5) —— 因果性被破坏，
-    /// 且症状是"书签随机丢失"，极难排查。
+    /// The wrong form (Update's third branch as "max == p then c = 0") gives B
+    /// (1000, 0), and its later Now() yields (1000, 1) &lt; (1000, 5) — causality broken,
+    /// with "bookmarks randomly lost" as the near-untraceable symptom.
     /// </para>
     /// </remarks>
     [Fact]
-    public void 因果性_同毫秒内追平远端()
+    public void Causality_CatchesUpRemoteWithinSameMillisecond()
     {
         Hlc a = Hlc.NewWithClock(new FixedClock(1000).Now);
         Hlc b = Hlc.NewWithClock(new FixedClock(1000).Now);
@@ -212,37 +212,37 @@ public class HlcTests
         b.Update(remote);
         string got = b.Now();
 
-        // 关键性质：B 的后续事件必须严格大于它刚收到的事件
+        // Key property: B's follow-up event must be strictly greater than what it just received
         Assert.True(
             Hlc.Compare(got, remote) > 0,
-            $"B 的后续事件 \"{got}\" 未大于远端的 \"{remote}\" —— 追平场景下因果性被破坏");
+            $"B follow-up event \"{got}\" not greater than remote \"{remote}\" — causality broken in catch-up");
 
-        // 精确值：Update 本身是一次接收事件，消耗了计数 6（rc+1），
-        // 随后的 Now() 再 +1 得到 7。比 6 更"浪费"一个计数是正确的 ——
-        // 论文的算法把 receiveEvent 也算作一个事件。
+        // Exact value: Update itself is a receive event consuming counter 6 (rc+1),
+        // the following Now() adds one more to reach 7. Spending one more than 6 is correct —
+        // the paper's algorithm counts receiveEvent as an event.
         Assert.Equal("0000000001000-00007", got);
     }
 
     [Fact]
-    public void 因果性_不依赖时钟偏差()
+    public void Causality_IndependentOfClockSkew()
     {
-        // B 的物理时钟比 A 快 1 小时。这个偏差绝不能影响因果性。
+        // B's physical clock runs 1 hour ahead of A. That skew must never affect causality.
         Hlc a = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L).Now);
         Hlc b = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L + 3_600_000L).Now);
 
         string t1 = a.Now();
         b.Update(t1);
         string t2 = b.Now();
-        Assert.True(Hlc.Compare(t2, t1) > 0, $"B 事件 \"{t2}\" 未大于 A 事件 \"{t1}\"");
+        Assert.True(Hlc.Compare(t2, t1) > 0, $"B event \"{t2}\" not greater than A event \"{t1}\"");
 
         a.Update(t2);
         string t3 = a.Now();
-        Assert.True(Hlc.Compare(t3, t2) > 0, $"A 事件 \"{t3}\" 未大于 B 事件 \"{t2}\"");
+        Assert.True(Hlc.Compare(t3, t2) > 0, $"A event \"{t3}\" not greater than B event \"{t2}\"");
     }
 
-    /// <summary>双向多轮传递，每一轮都必须严格递增。</summary>
+    /// <summary>Two-way multi-round exchange; every round must strictly advance.</summary>
     [Fact]
-    public void 因果性_双向乒乓五十轮()
+    public void Causality_BidirectionalPingPongFiftyRounds()
     {
         Hlc a = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L).Now);
         Hlc b = Hlc.NewWithClock(new FixedClock(1_000_000_000_000L).Now);
@@ -252,42 +252,42 @@ public class HlcTests
             string lastA = a.Now();
             b.Update(lastA);
             string lastB = b.Now();
-            Assert.True(Hlc.Compare(lastB, lastA) > 0, $"第 {round} 轮：B 的 \"{lastB}\" 未大于 A 的 \"{lastA}\"");
+            Assert.True(Hlc.Compare(lastB, lastA) > 0, $"round {round}: B \"{lastB}\" not greater than A \"{lastA}\"");
 
             a.Update(lastB);
             string back = a.Now();
-            Assert.True(Hlc.Compare(back, lastB) > 0, $"第 {round} 轮：A 的 \"{back}\" 未大于 B 的 \"{lastB}\"");
+            Assert.True(Hlc.Compare(back, lastB) > 0, $"round {round}: A \"{back}\" not greater than B \"{lastB}\"");
         }
     }
 
     /// <summary>
-    /// 物理时钟被调回过去时，HLC 的逻辑时间必须继续前进，
-    /// 否则已发出的时间戳会与新生成的撞在一起。
+    /// When the physical clock jumps back, HLC logical time must keep moving forward,
+    /// or issued timestamps would collide with newly generated ones.
     /// </summary>
     [Fact]
-    public void 时钟回拨不倒退()
+    public void ClockRollbackDoesNotGoBackward()
     {
         var clk = new FixedClock(2_000_000_000_000L);
         Hlc h = Hlc.NewWithClock(clk.Now);
 
         string first = h.Now();
-        clk.Set(2_000_000_000_000L - 3_600_000L); // 用户或 NTP 把时钟调回 1 小时前
+        clk.Set(2_000_000_000_000L - 3_600_000L); // User or NTP turned the clock back 1 hour
 
         string prev = first;
         for (int i = 0; i < 100; i++)
         {
             string cur = h.Now();
-            Assert.True(Hlc.Compare(cur, prev) > 0, $"时钟回拨后第 {i} 次 Now() 未递增: \"{prev}\" → \"{cur}\"");
+            Assert.True(Hlc.Compare(cur, prev) > 0, $"Now() #{i} after rollback did not advance: \"{prev}\" → \"{cur}\"");
             prev = cur;
         }
 
-        Assert.True(Hlc.Compare(h.Current(), first) >= 0, $"回拨后当前时间 \"{h.Current()}\" 小于回拨前的 \"{first}\"");
+        Assert.True(Hlc.Compare(h.Current(), first) >= 0, $"post-rollback current \"{h.Current()}\" older than pre-rollback \"{first}\"");
     }
 
-    // ── 比较与工具函数 ────────────────────────────────────────────────
+    // ── Comparison and helpers ────────────────────────────────────────────
 
     [Fact]
-    public void Compare_全序()
+    public void Compare_IsTotalOrder()
     {
         string smaller = Hlc.Encode(1000, 5);
         string larger = Hlc.Encode(1000, 6);
@@ -298,17 +298,17 @@ public class HlcTests
         Assert.Equal(0, Hlc.Compare(smaller, smaller));
         Assert.Equal(1, Hlc.Compare(nextMs, larger));
 
-        // 非法值排在合法值之前，保证被污染的一侧永远输，不会污染权威状态
+        // Invalid values sort before valid ones, so a tainted side always loses and never taints authoritative state
         Assert.Equal(-1, Hlc.Compare("garbage", smaller));
         Assert.Equal(1, Hlc.Compare(smaller, "garbage"));
 
-        // 两侧均非法时退化为字典序，保证确定性
+        // Two invalid sides fall back to ordinal order, keeping determinism
         Assert.Equal(string.CompareOrdinal("a", "b"), Hlc.Compare("a", "b"));
         Assert.Equal(string.CompareOrdinal("b", "a"), Hlc.Compare("b", "a"));
     }
 
     [Fact]
-    public void MaxHlc_取最大并忽略非法值()
+    public void MaxHlc_TakesMaxAndIgnoresInvalid()
     {
         Assert.Equal(Hlc.Zero, Hlc.MaxHlc([]));
 
@@ -321,7 +321,7 @@ public class HlcTests
     }
 
     [Fact]
-    public void State_MaxHlc_同时扫描M和A()
+    public void State_MaxHlc_ScansBothMAndA()
     {
         State s = State.New();
         Assert.Equal(Hlc.Zero, s.MaxHlc());
@@ -329,38 +329,38 @@ public class HlcTests
         s.Items["k1"] = new Item { M = Hlc.Encode(1000, 0), A = Hlc.Encode(500, 0) };
         s.Items["k2"] = new Item { M = Hlc.Encode(900, 0), A = Hlc.Encode(2000, 3) };
 
-        // 期望取到 a 字段的最大值
+        // Expect the maximum of the a fields
         Assert.Equal(Hlc.Encode(2000, 3), s.MaxHlc());
     }
 
     [Fact]
-    public void ObserveMany_吸收远端最大值()
+    public void ObserveMany_AbsorbsRemoteMaximum()
     {
         Hlc h = Hlc.NewWithClock(new FixedClock(500).Now);
         string remote = Hlc.Encode(9000, 12);
 
         string got = h.ObserveMany([Hlc.Encode(100, 0), remote, "garbage"]);
-        Assert.True(Hlc.Compare(got, remote) >= 0, $"ObserveMany 后 \"{got}\" 未追上远端 \"{remote}\"");
+        Assert.True(Hlc.Compare(got, remote) >= 0, $"ObserveMany left \"{got}\" behind remote \"{remote}\"");
 
         string next = h.Now();
-        Assert.True(Hlc.Compare(next, remote) > 0, $"ObserveMany 后的 Now() = \"{next}\"，未大于远端 \"{remote}\"");
+        Assert.True(Hlc.Compare(next, remote) > 0, $"Now() after ObserveMany = \"{next}\" not greater than remote \"{remote}\"");
     }
 
     [Fact]
-    public void Update_收到非法远端不崩且仍单调()
+    public void Update_InvalidRemoteDoesNotCrashAndStaysMonotonic()
     {
         Hlc h = Hlc.NewWithClock(new FixedClock(1000).Now);
 
         string first = h.Now();
-        string got = h.Update("完全不是 HLC");
+        string got = h.Update("not an HLC at all");
 
-        Assert.True(Hlc.IsValid(got), $"非法远端之后仍应产出合法 HLC，得到 \"{got}\"");
-        Assert.True(Hlc.Compare(got, first) > 0, $"非法远端之后 \"{got}\" 未大于 \"{first}\"");
+        Assert.True(Hlc.IsValid(got), $"invalid remote must still yield a valid HLC, got \"{got}\"");
+        Assert.True(Hlc.Compare(got, first) > 0, $"after invalid remote \"{got}\" not greater than \"{first}\"");
     }
 
-    /// <summary>HLC 会被多个线程碰到（HTTP handler + 快照），必须无竞态。</summary>
+    /// <summary>HLC is touched from multiple threads (HTTP handlers + snapshots) and must be race-free.</summary>
     [Fact]
-    public void 并发安全()
+    public void IsThreadSafe()
     {
         Hlc h = Hlc.New();
         long baseMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -386,7 +386,7 @@ public class HlcTests
     }
 }
 
-// ── 跨端一致性向量 ──────────────────────────────────────────────────────
+// ── Cross-client consistency vectors ────────────────────────────────────
 
 internal sealed class HlcVector
 {
@@ -410,31 +410,31 @@ internal sealed class HlcVectorFile
 }
 
 /// <summary>
-/// 跨端一致性验证：Go ↔ C# ↔ JS 三方对同一份 test/hlc_vectors.json 负责。
+/// Cross-client consistency: Go, C#, and JS all answer for the same test/hlc_vectors.json.
 /// </summary>
 /// <remarks>
-/// 这是整个移植里价值最高的两个测试：
+/// The two highest-value tests of the whole port:
 /// <list type="bullet">
-/// <item><b>C# 回放</b>：证明 C# 实现与 Go 产出的向量逐条一致。</item>
-/// <item><b>C# 导出</b>：生成一份新的向量供 JS 侧复现，把链条闭上。</item>
+/// <item><b>C# replay</b>: proves the C# implementation matches every Go-produced vector.</item>
+/// <item><b>C# export</b>: produces fresh vectors for the JS side to replay, closing the loop.</item>
 /// </list>
-/// 两端 HLC 不一致会让合并在 "m 恰好相等" 的分支上产生非确定行为 ——
-/// 同一对书签在不同轮次里交替获胜，两端发散。
+/// Divergent HLCs make the merge nondeterministic on the "m exactly equal" branch —
+/// the same bookmark pair alternately wins across rounds and the two sides diverge.
 /// </remarks>
 public class HlcVectorTests
 {
     /// <summary>
-    /// 定位向量文件：从测试的运行目录一路向上找，直到找到
-    /// <c>test/hlc_vectors.json</c>。
+    /// Locate the vectors file: walk up from the test run directory until
+    /// <c>test/hlc_vectors.json</c> is found.
     /// </summary>
     /// <remarks>
-    /// 刻意<b>不写死向上找几级</b>。写死层数（"退 5 级"）在目录结构一改就失效，
-    /// 而失效的表现是"找不到文件"——如果那时顺手改成 Skip，就会得到一个
-    /// 永远不验证跨端一致性的假绿灯（这正是 docs/plan.md 附录 D 第 13、15 条
-    /// 踩过的坑）。向上找到文件系统根为止，找不到就让测试失败。
+    /// Deliberately <b>not a fixed number of levels</b>. A fixed depth ("go up 5") breaks on any
+    /// directory reshuffle with "file not found" — and if someone then reaches for Skip, the result
+    /// is a permanently green suite that never verifies cross-client consistency (exactly the
+    /// "green on both sides, yet never verifying" trap). Walk up to the filesystem root; fail if not found.
     /// <para>
-    /// 也不直接用相对路径：测试的运行目录是 bin/Debug/net10.0/，而"从项目目录
-    /// 跑 dotnet test"时工作目录又不同，只有从程序集位置出发才两种都对。
+    /// No plain relative path either: the test run directory is bin/Debug/net10.0/, while "dotnet test
+    /// from the project directory" uses another working directory — only the assembly location works for both.
     /// </para>
     /// </remarks>
     private static string VectorsPath
@@ -450,8 +450,8 @@ public class HlcVectorTests
                 }
             }
 
-            // 找不到时返回一个"不可能存在"的路径，让 Assert.True(File.Exists(...))
-            // 带着可读的路径信息失败。绝不用 Skip 掩盖。
+            // When missing, return an "impossible" path so Assert.True(File.Exists(...))
+            // fails with a readable path. Never paper over it with Skip.
             return Path.Combine(
                 Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "test", "hlc_vectors.json")));
         }
@@ -460,29 +460,28 @@ public class HlcVectorTests
     private static List<HlcVector> LoadVectors()
     {
         string path = VectorsPath;
-        Assert.True(File.Exists(path), $"找不到向量文件 {path} —— 跨端验证无法进行");
+        Assert.True(File.Exists(path), $"vectors file not found at {path} — cross-client verification impossible");
         string json = File.ReadAllText(path);
         return JsonSerializer.Deserialize(json, TestJsonContext.Default.HlcVectorFile)!.Vectors;
     }
 
     /// <summary>
-    /// 逐条回放 Go 生成的向量并验证实际值。
+    /// Replay every Go-generated vector and verify the actual values.
     /// </summary>
     /// <remarks>
-    /// 这是一个<b>自检</b>：回放器只做向量里说的事（op 是 now 就调 now，
-    /// 是 update 就调 update），然后断言结果与向量一致。
+    /// This is a <b>self-check</b>: the replayer only does what the vector says (now → Now(),
+    /// update → Update()), then asserts the outcome matches the vector.
     /// <para>
-    /// 它存在的意义是捕捉"生成器与回放器不一致"这类问题：向量文件既是产物
-    /// 又是期望值，如果只有生成它的那个测试来验证自己，生成器一旦有 bug
-    /// （比如无条件多调一次 now()），错误会被一起固化进向量文件，永远发现不了。
-    /// 详见 docs/plan.md 附录 D 第 13 条。
+    /// It exists to catch "generator and replayer disagree" bugs: the vectors file is both artifact
+    /// and expectation, so if only the generating test verified itself, a generator bug
+    /// (e.g. one unconditional extra Now()) would be baked into the file forever, undiscovered.
     /// </para>
     /// </remarks>
     [Fact]
-    public void 回放向量()
+    public void ReplaysVectors()
     {
         List<HlcVector> vectors = LoadVectors();
-        Assert.True(vectors.Count >= 15, $"向量数量 {vectors.Count} 偏少，跨端验证覆盖不足");
+        Assert.True(vectors.Count >= 15, $"only {vectors.Count} vectors, too few for cross-client coverage");
 
         var clk = new FixedClock(0);
         Hlc h = Hlc.NewWithClock(clk.Now);
@@ -498,28 +497,28 @@ public class HlcVectorTests
             {
                 bad++;
                 Assert.Fail(
-                    $"第 {i + 1} 条不一致（op={v.Op} at={v.At} remote=\"{v.Remote}\"）:\n" +
-                    $"  向量: {v.Out}\n  实际: {got}");
+                    $"vector #{i + 1} mismatch (op={v.Op} at={v.At} remote=\"{v.Remote}\"):\n" +
+                    $"  vectors file: {v.Out}\n  actual: {got}");
             }
         }
 
-        Assert.True(bad == 0, $"共 {bad}/{vectors.Count} 条不一致 —— C# 实现与 Go 已分节");
+        Assert.True(bad == 0, $"{bad}/{vectors.Count} vectors mismatch — C# has diverged from Go");
     }
 
     /// <summary>
-    /// 用 C# 重新生成一份向量，与文件里的逐条比对。
+    /// Regenerate vectors from scratch in C# and compare with the file.
     /// </summary>
     /// <remarks>
-    /// 与 <see cref="回放向量"/> 互为镜像：回放证明"C# 能复现文件里的
-    /// 输出"，本测试证明"C# 从头算一遍也得到同样结果" —— 后者能抓住那种
-    /// "回放器和实现共享同一个 bug，所以一起错"的盲区。
+    /// Mirrors <see cref="ReplaysVectors"/>: replay proves "C# reproduces the file's
+    /// outputs"; this proves "C# recomputed from scratch agrees too" — catching the blind spot
+    /// where "replayer and implementation share one bug, so both err together".
     /// <para>
-    /// 不覆盖文件：向量文件是三端共享的产物，只应由生成器更新（见下方
-    /// <see cref="导出向量供JS复现"/>）。这里只做比对。
+    /// Never overwrites the file: vectors are a three-way shared artifact updated only by the
+    /// generator (see <see cref="ExportsVectorsForJsReplay"/> below). Compare only.
     /// </para>
     /// </remarks>
     [Fact]
-    public void 从头计算的结果与向量一致()
+    public void FreshComputationMatchesVectors()
     {
         List<HlcVector> vectors = LoadVectors();
         var clk = new FixedClock(1_700_000_000_000L);
@@ -537,41 +536,41 @@ public class HlcVectorTests
         {
             if (produced[i] != vectors[i].Out)
             {
-                mismatches.Add($"  第 {i + 1} 条: 向量={vectors[i].Out} C#={produced[i]}");
+                mismatches.Add($"  vector #{i + 1}: file={vectors[i].Out} C#={produced[i]}");
             }
         }
 
         Assert.True(
             mismatches.Count == 0,
-            $"C# 从头计算与向量有 {mismatches.Count} 处不同:\n{string.Join('\n', mismatches)}");
+            $"C# recomputation differs from vectors in {mismatches.Count} places:\n{string.Join('\n', mismatches)}");
     }
 
     /// <summary>
-    /// 导出向量供 JS 侧复现（等价于 Go 版的 TestHLCExportVectors）。
+    /// Export vectors for the JS side to replay (equivalent of Go's TestHLCExportVectors).
     /// </summary>
     /// <remarks>
-    /// 默认**不覆盖**文件 —— 覆盖是显式动作，理由见
+    /// By default the file is **not** overwritten — overwriting is explicit, for the reasons in
     /// <see cref="HlcVectorExportTests.WriteVectors_RefusesWhenDirectoryMissing"/>
-    /// 与 Go 侧同款防护。设环境变量 <c>BMSYNC_WRITE_VECTORS=1</c> 才真正写入。
+    /// (same guard as the Go side). Only writes with <c>BMSYNC_WRITE_VECTORS=1</c> set.
     /// </remarks>
     [Fact]
-    public void 导出向量供JS复现()
+    public void ExportsVectorsForJsReplay()
     {
         string path = VectorsPath;
         (string blob, int count) = HlcVectorExportTests.BuildVectors();
 
         if (Environment.GetEnvironmentVariable("BMSYNC_WRITE_VECTORS") != "1")
         {
-            // 不写也要确保"能算出来"：生成器坏掉时必须在测试阶段就发现，
-            // 而不是等到真去跑导出命令时才发现。
-            Assert.True(count >= 15, $"只生成了 {count} 条向量，覆盖不足");
+            // Even without writing, ensure vectors "can be produced": a broken generator must fail
+            // at test time, not when someone finally runs the export command.
+            Assert.True(count >= 15, $"only produced {count} vectors, insufficient coverage");
             Assert.False(string.IsNullOrWhiteSpace(blob));
             _ = path;
             return;
         }
 
         string dir = Path.GetDirectoryName(path)!;
-        Assert.True(Directory.Exists(dir), $"向量目录 {dir} 不存在 —— 拒绝新建（路径写错的信号）");
+        Assert.True(Directory.Exists(dir), $"vectors directory {dir} missing — refuse to create it (a wrong-path signal)");
         File.WriteAllText(path, blob);
     }
 }

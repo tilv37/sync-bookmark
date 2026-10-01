@@ -1,49 +1,49 @@
-' bmsync —— POST /api/sync 全链路时序
-' 代码依据：ApiEndpoints.HandleSyncAsync（ApiEndpoints.cs:34）、
-' BmsyncServer 中间件顺序（BmsyncServer.cs:88-136）、
-' BookmarkStore.SyncAsync（BookmarkStore.cs:165）、Merger.Merge（Merge.cs:159）
+' bmsync — POST /api/sync end-to-end sequence
+' Code refs: ApiEndpoints.HandleSyncAsync (ApiEndpoints.cs:34),
+' BmsyncServer middleware order (BmsyncServer.cs:88-136),
+' BookmarkStore.SyncAsync (BookmarkStore.cs:165), Merger.Merge (Merge.cs:159)
 
 @startuml seq-sync
-title POST /api/sync 同步时序
+title POST /api/sync sync sequence
 
-actor "用户" as U
-participant "扩展\nbackground/runSync" as Ext
-participant "中间件\n访问日志→Auth.Protect" as Mid
+actor "User" as U
+participant "Extension\nbackground/runSync" as Ext
+participant "Middleware\naccess log->Auth.Protect" as Mid
 participant "ApiEndpoints\nHandleSyncAsync" as Api
 participant "BookmarkStore\nSyncAsync" as Store
 participant "Merger.Merge\n+ TombstoneGc" as Merge
-database "磁盘\nstate/conflicts/history" as Disk
+database "Disk\nstate/conflicts/history" as Disk
 
-U -> Ext : 点“立即同步”（手势里先申请 host 权限）
+U -> Ext : Click Sync now (request host permission inside the gesture first)
 Ext -> Mid : POST /api/sync {device, state, base}
-note right of Mid : 先限流后鉴权；/api/health 免鉴权
+note right of Mid : Rate-limit first, then auth; /api/health skips auth
 
-alt 限流超标 → 429 / token 错 → 401
-  Mid --> Ext : 4xx（不碰任何状态）
-  note right of Ext : 非 200 绝不动本地书签\n（design.md §9.6）
-else 放行
-  Mid -> Api : ctx（HttpContext 显式传参）
-  Api -> Api : ReadBody（16MB 上限）→ ParseRequest\n→ schema 版本 → State.Validate()
-  alt 畸形/超限 → 400
+alt Rate limit exceeded -> 429 / bad token -> 401
+  Mid --> Ext : 4xx (touches no state)
+  note right of Ext : Non-200 never touches local bookmarks\n(design.md §9.6)
+else Allowed
+  Mid -> Api : ctx (HttpContext passed explicitly)
+  Api -> Api : ReadBody (16MB cap) -> ParseRequest\n-> schema version -> State.Validate()
+  alt Malformed/over limit -> 400
     Api --> Ext : bad_request / validation_failed
-  else 合法
+  else Valid
     Api -> Store : SyncAsync(incoming, base, device)
     activate Store
-    Store -> Store : _gate.WaitAsync（串行化临界区）
-    Store -> Disk : SnapshotLockedAsync（写前快照，失败不阻断）
+    Store -> Store : _gate.WaitAsync (serialized critical section)
+    Store -> Disk : SnapshotLockedAsync (pre-write snapshot, failure is non-blocking)
     Store -> Merge : Merger.Merge(server, incoming, base, device, now)
     activate Merge
-    Merge -> Merge : ObserveMany(客户端时间戳)\n→ 并集 key 字典序遍历 → LWW 决胜\n→ 三方冲突检测（纯观测）→ MergeInvariants
+    Merge -> Merge : ObserveMany(client timestamps)\n-> union keys in lexicographic order -> LWW decision\n-> three-way conflict detection (observe-only) -> MergeInvariants
     Merge --> Store : MergeResult{State, Conflicts, Summary}
     deactivate Merge
-    Store -> Store : TombstoneGc.CollectFrom（过期墓碑计入 Deleted）
-    Store -> Store : _clock.Update(MaxHlc) → ticked.Validate()
-    Store -> Disk : SaveLockedAsync（tmp→fsync→rename）
-    Store -> Disk : AppendConflictsLockedAsync（环形 500）
-    Store --> Api : MergeResult（权威 state）
+    Store -> Store : TombstoneGc.CollectFrom (expired tombstones counted as Deleted)
+    Store -> Store : _clock.Update(MaxHlc) -> ticked.Validate()
+    Store -> Disk : SaveLockedAsync (tmp->fsync->rename)
+    Store -> Disk : AppendConflictsLockedAsync (ring 500)
+    Store --> Api : MergeResult (authoritative state)
     deactivate Store
     Api --> Ext : 200 {state, summary, conflicts, hlc, serverTime}
-    Ext -> Ext : HLC 校准 → planApply → executePlan\n→ saveState（完整替换缓存）
+    Ext -> Ext : HLC calibrate -> planApply -> executePlan\n-> saveState (full cache replace)
   end
 end
 @enduml

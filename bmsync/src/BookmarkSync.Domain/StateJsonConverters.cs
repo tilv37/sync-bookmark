@@ -4,34 +4,32 @@ using System.Text.Json.Serialization;
 namespace BookmarkSync.Domain;
 
 /// <summary>
-/// <see cref="Item"/> 的 JSON 转换器，逐字节对齐 Go 的 <c>encoding/json</c> 行为。
+/// JSON converter for <see cref="Item"/>, aligned byte-for-byte with Go's <c>encoding/json</c>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 手写而不是靠 <c>[JsonIgnore(Condition = WhenWritingDefault)]</c>，原因是一个
-/// 已实测确认的坑：
+/// Hand-written instead of relying on <c>[JsonIgnore(Condition = WhenWritingDefault)]</c>
+/// because of a verified pitfall:
 /// </para>
 /// <list type="bullet">
 /// <item>
-/// <b>空串不会被省略。</b>C# 的 <c>WhenWritingDefault</c> 对 <c>string</c> 判断的是
-/// <c>null</c>，而 <c>""</c> 不是 null，所以它照样会写出 <c>"u":""</c>；
-/// Go 的 <c>omitempty</c> 对字符串判断 <c>== ""</c>，会省略。
-/// 已用最小复现程序确认，不靠记忆。
+/// <b>Empty strings are not omitted.</b> C# <c>WhenWritingDefault</c> treats only
+/// <c>null</c> as default for <c>string</c>, so <c>""</c> is still written as
+/// <c>"u":""</c>; Go's <c>omitempty</c> omits <c>== ""</c>. Confirmed with a
+/// minimal repro, not from memory.
 /// </item>
 /// <item>
-/// <b>非 ASCII 转义。</b>.NET 默认把中文字符写成 <c>中</c>（6 倍体积），
-/// 而 Go 原样输出 UTF-8。书签标题大量含中文，5000 条书签的
-/// 请求体会从约 800KB 涨到 4MB 以上，直接撞上 nginx 的
-/// <c>client_max_body_size</c>。解决办法是全局
-/// <see cref="JsonSerializerOptions.Encoder"/> 用
-/// <see cref="JavaScriptEncoder.UnsafeRelaxedJsonEscaping"/>（见
-/// <see cref="BmsyncJson"/>）。
+/// <b>Non-ASCII escaping.</b> .NET escapes CJK characters as <c>\uXXXX</c> (6x size)
+/// while Go emits raw UTF-8. Bookmark titles are largely CJK, so 5000 bookmarks
+/// would grow from ~800KB to 4MB+ and hit nginx <c>client_max_body_size</c>. The fix
+/// is a global <see cref="JsonSerializerOptions.Encoder"/> of
+/// <see cref="JavaScriptEncoder.UnsafeRelaxedJsonEscaping"/> (see <see cref="BmsyncJson"/>).
 /// </item>
 /// </list>
 /// <para>
-/// 字段顺序按 Go 结构体声明顺序写出：p t n u a m d x。不是为了兼容
-/// （JSON 解析器不在乎顺序），而是为了让 state.json 的人工 diff 可读、
-/// 且能与 Go 版逐字节对照。
+/// Fields are written in Go struct declaration order: p t n u a m d x. Not for
+/// compatibility (JSON parsers ignore order), but to keep state.json diffs readable
+/// and byte-comparable with the Go build.
 /// </para>
 /// </remarks>
 public sealed class ItemJsonConverter : JsonConverter<Item>
@@ -40,7 +38,7 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
     {
         if (reader.TokenType != JsonTokenType.StartObject)
         {
-            throw new JsonException($"item 应为 JSON 对象，实际是 {reader.TokenType}");
+            throw new JsonException($"item must be a JSON object, got {reader.TokenType}");
         }
 
         string p = string.Empty, t = string.Empty, n = string.Empty, u = string.Empty;
@@ -57,20 +55,21 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
 
             if (reader.TokenType != JsonTokenType.PropertyName)
             {
-                throw new JsonException($"item 内出现意外的 {reader.TokenType}");
+                throw new JsonException($"unexpected {reader.TokenType} inside item");
             }
 
             string prop = reader.GetString()!;
             if (!reader.Read())
             {
-                throw new JsonException($"item 字段 {prop} 后缺少值");
+                throw new JsonException($"missing value after item field {prop}");
             }
 
             switch (prop)
             {
-                // 缺失字段与 null 都当空串，与 Go 把缺字段留成零值 "" 的行为一致。
-                // 之所以容忍 null：客户端漏发字段不该让整份上传被拒 ——
-                // 硬错误应该留给"格式非法"（见 State.Validate）而不是"字段没来"。
+                // Missing fields and null both become empty strings, matching Go leaving
+                // absent fields at the "" zero value. Null is tolerated because a client
+                // omitting a field should not doom the whole upload — hard errors are
+                // reserved for malformed data (see State.Validate), not missing fields.
                 case "p": p = ReadStringOrEmpty(ref reader); break;
                 case "t": t = ReadStringOrEmpty(ref reader); break;
                 case "n": n = ReadStringOrEmpty(ref reader); break;
@@ -82,16 +81,18 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
                     x = reader.TokenType == JsonTokenType.Number ? reader.GetInt64() : 0;
                     break;
                 default:
-                    // 未知字段的处理取决于上下文：解析客户端请求要报错
-                    // （字段名拼错必须立刻暴露），读自己写出的 state.json 要放过
-                    // （它是持久化格式，加字段后旧版本读到新文件不该崩）。
+                    // Unknown fields depend on context: parsing a client request must fail
+                    // (a typoed field name has to surface immediately), while reading our
+                    // own state.json must pass (it is a persisted format; an old build
+                    // reading a newer file must not crash on added fields).
                     //
-                    // UnmappedMemberHandling 这个选项**只对反射式反序列化生效**，
-                    // 自定义转换器必须自己读它。漏读的症状是"严格模式形同虚设"，
-                    // 而且测不出来 —— 请求照样成功，只是拼错的字段被静默忽略。
+                    // UnmappedMemberHandling only applies to reflection-based
+                    // deserialization, so a custom converter must read it itself. Missing
+                    // it makes strict mode toothless — and untestable, since requests
+                    // still succeed while misspelled fields are silently dropped.
                     if (options.UnmappedMemberHandling == JsonUnmappedMemberHandling.Disallow)
                     {
-                        throw new JsonException($"item 含未知字段 \"{prop}\"");
+                        throw new JsonException($"item contains unknown field \"{prop}\"");
                     }
 
                     reader.Skip();
@@ -99,15 +100,16 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
             }
         }
 
-        throw new JsonException("item 对象没有正常结束");
+        throw new JsonException("unterminated item object");
     }
 
     public override void Write(Utf8JsonWriter writer, Item value, JsonSerializerOptions options) =>
         WriteItem(writer, value, options);
 
     /// <summary>
-    /// 写一个 item 的实际实现。internal 供 <see cref="StateJsonConverter"/> 直接调用，
-    /// 以避开 <c>JsonSerializer.Serialize</c> 泛型重载的 AOT 警告（IL2026/IL3050）。
+    /// Actual item writer. Internal so <see cref="StateJsonConverter"/> can call it
+    /// directly and avoid the <c>JsonSerializer.Serialize</c> generic overload's AOT
+    /// warnings (IL2026/IL3050).
     /// </summary>
     internal static void WriteItem(Utf8JsonWriter writer, Item value, JsonSerializerOptions options)
     {
@@ -140,7 +142,7 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
 
         if (reader.TokenType != JsonTokenType.String)
         {
-            throw new JsonException($"期望字符串，实际是 {reader.TokenType}");
+            throw new JsonException($"expected string, got {reader.TokenType}");
         }
 
         return reader.GetString() ?? string.Empty;
@@ -156,13 +158,13 @@ public sealed class ItemJsonConverter : JsonConverter<Item>
 }
 
 /// <summary>
-/// <see cref="State"/> 的 JSON 转换器：把 items 的 key <b>排序后</b>写出。
+/// JSON converter for <see cref="State"/>: writes items with keys <b>sorted</b>.
 /// </summary>
 /// <remarks>
-/// Go 的 <c>encoding/json</c> 序列化 map 时会把 key 排序输出；.NET 的
-/// <c>Dictionary</c> 按插入顺序遍历。不对齐的后果不是"解析出错"——那不会发生，
-/// 而是 state.json 里 key 顺序随机：每次同步重写文件后 <c>git diff</c> 满屏
-/// 噪声，而且两套实现（曾经有 Go 与 C# 两份）无法逐字节对照。
+/// Go's <c>encoding/json</c> emits maps with sorted keys; .NET's <c>Dictionary</c>
+/// iterates in insertion order. The mismatch would not break parsing — it would make
+/// key order in state.json random, so every sync rewrite produces a noisy
+/// <c>git diff</c> and the two implementations could not be compared byte-for-byte.
 /// </remarks>
 public sealed class StateJsonConverter : JsonConverter<State>
 {
@@ -170,7 +172,7 @@ public sealed class StateJsonConverter : JsonConverter<State>
     {
         if (reader.TokenType != JsonTokenType.StartObject)
         {
-            throw new JsonException($"state 应为 JSON 对象，实际是 {reader.TokenType}");
+            throw new JsonException($"state must be a JSON object, got {reader.TokenType}");
         }
 
         int v = 0;
@@ -193,13 +195,13 @@ public sealed class StateJsonConverter : JsonConverter<State>
 
             if (reader.TokenType != JsonTokenType.PropertyName)
             {
-                throw new JsonException($"state 内出现意外的 {reader.TokenType}");
+                throw new JsonException($"unexpected {reader.TokenType} inside state");
             }
 
             string prop = reader.GetString()!;
             if (!reader.Read())
             {
-                throw new JsonException($"state 字段 {prop} 后缺少值");
+                throw new JsonException($"missing value after state field {prop}");
             }
 
             switch (prop)
@@ -225,7 +227,7 @@ public sealed class StateJsonConverter : JsonConverter<State>
                 default:
                     if (options.UnmappedMemberHandling == JsonUnmappedMemberHandling.Disallow)
                     {
-                        throw new JsonException($"state 含未知字段 \"{prop}\"");
+                        throw new JsonException($"state contains unknown field \"{prop}\"");
                     }
 
                     reader.Skip();
@@ -233,7 +235,7 @@ public sealed class StateJsonConverter : JsonConverter<State>
             }
         }
 
-        throw new JsonException("state 对象没有正常结束");
+        throw new JsonException("unterminated state object");
     }
 
     public override void Write(Utf8JsonWriter writer, State value, JsonSerializerOptions options)
@@ -259,19 +261,18 @@ public sealed class StateJsonConverter : JsonConverter<State>
     }
 
     /// <summary>
-    /// 写一个 item —— 直接调 <see cref="ItemJsonConverter"/> 而不是
-    /// <c>JsonSerializer.Serialize(writer, item, options)</c>。
+    /// Write one item by calling <see cref="ItemJsonConverter"/> directly instead of
+    /// <c>JsonSerializer.Serialize(writer, item, options)</c>.
     /// </summary>
     /// <remarks>
-    /// 后者带 <c>[RequiresUnreferencedCode]</c> 与
-    /// <c>[RequiresDynamicCode]</c>，在 PublishAot 下会报 IL2026 / IL3050
-    /// 两个错误。它们说的是"JSON 序列化需要运行时生成代码" ——
-    /// 而这里根本不需要运行时生成任何代码：转换器是我手写的，
-    /// 字段名是写死的。
+    /// The generic overload carries <c>[RequiresUnreferencedCode]</c> and
+    /// <c>[RequiresDynamicCode]</c>, which fail PublishAot with IL2026 / IL3050 about
+    /// "JSON serialization needs runtime codegen" — but nothing here needs runtime
+    /// codegen: the converter is hand-written and field names are hard-coded.
     /// <para>
-    /// 也就是说这个错误是<b>误报</b>：泛型重载为了通用性做了保守假设，
-    /// 而我们已经精确知道要用哪个转换器。绕过它的正确做法是显式调用，
-    /// 不是加 <c>NoWarn</c> —— 后者会让真正的 AOT 不兼容问题也一起被吞掉。
+    /// The error is a <b>false positive</b>: the generic overload assumes the worst
+    /// case, while we know exactly which converter to use. Calling it explicitly is
+    /// the right fix; adding <c>NoWarn</c> would also swallow genuine AOT issues.
     /// </para>
     /// </remarks>
     private static void WriteItem(Utf8JsonWriter writer, Item item, JsonSerializerOptions options) =>
@@ -284,7 +285,7 @@ public sealed class StateJsonConverter : JsonConverter<State>
     {
         if (reader.TokenType != JsonTokenType.StartObject)
         {
-            throw new JsonException($"items 应为 JSON 对象，实际是 {reader.TokenType}");
+            throw new JsonException($"items must be a JSON object, got {reader.TokenType}");
         }
 
         var items = State.NewItemsDictionary();
@@ -298,18 +299,18 @@ public sealed class StateJsonConverter : JsonConverter<State>
 
             if (reader.TokenType != JsonTokenType.PropertyName)
             {
-                throw new JsonException($"items 内出现意外的 {reader.TokenType}");
+                throw new JsonException($"unexpected {reader.TokenType} inside items");
             }
 
             string key = reader.GetString()!;
             if (!reader.Read())
             {
-                throw new JsonException($"item {key} 后缺少值");
+                throw new JsonException($"missing value after item {key}");
             }
 
             items[key] = itemConverter.Read(ref reader, typeof(Item), options);
         }
 
-        throw new JsonException("items 对象没有正常结束");
+        throw new JsonException("unterminated items object");
     }
 }

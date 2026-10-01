@@ -1,14 +1,15 @@
 #!/bin/sh
-# 扩展的静态检查。
+# Static checks for the extension.
 #
-# 本机可能没有 Node，所以这里只做不需要 JS 引擎的检查：
-#   · JSON 文件是否合法（manifest.json）
-#   · background 里注册的 message type 与调用方请求的是否一致
-#   · import 的文件是否存在
-#   · HTML 里引用的 id 与 JS 里 getElementById 的是否一致
+# No Node on this machine is fine: everything here needs no JS engine:
+#   · JSON files valid (manifest.json)
+#   · message types registered in background match what callers request
+#   · imported files exist
+#   · ids referenced in HTML match getElementById usage in JS
 #
-# 这些都是"拼错名字"类的问题 —— 不会让扩展崩溃，但会让某个按钮
-# 永远没反应，而那种 bug 从界面上极难定位。
+# All of these are "misspelled name" bugs — they never crash the extension,
+# but they leave some button permanently dead, which is extremely hard to
+# locate from the UI.
 
 set -eu
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
@@ -21,135 +22,139 @@ bad() { fail=$((fail+1)); printf '  \033[31mFAIL\033[0m  %s\n' "$1"
         [ -n "${2:-}" ] && printf '        %s\n' "$2"; return 0; }
 section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
-[ -d "$EXT" ] || { echo "找不到 $EXT" >&2; exit 1; }
+[ -d "$EXT" ] || { echo "Missing $EXT" >&2; exit 1; }
 
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 
-# ── 1. JSON 合法性 ────────────────────────────────────────────────────
-section "1. JSON 文件"
+# ── 1. JSON validity ────────────────────────────────────────────────
+section "1. JSON files"
 check_json() {
     if command -v python3 >/dev/null 2>&1 && python3 -c '' 2>/dev/null; then
         if python3 -c "import json,sys;json.load(open(sys.argv[1],encoding='utf-8'))" "$1" 2>/dev/null; then
-            ok "$(basename "$1") 是合法 JSON"
+            ok "$(basename "$1") is valid JSON"
         else
-            bad "$(basename "$1") JSON 非法" "$(python3 -c "import json,sys;json.load(open(sys.argv[1],encoding='utf-8'))" "$1" 2>&1 | tail -1)"
+            bad "$(basename "$1") is invalid JSON" "$(python3 -c "import json,sys;json.load(open(sys.argv[1],encoding='utf-8'))" "$1" 2>&1 | tail -1)"
         fi
     elif command -v jq >/dev/null 2>&1; then
         if jq -e . "$1" >/dev/null 2>&1; then
-            ok "$(basename "$1") 是合法 JSON"
+            ok "$(basename "$1") is valid JSON"
         else
-            bad "$(basename "$1") JSON 非法"
+            bad "$(basename "$1") is invalid JSON"
         fi
     else
-        printf '  \033[33mskip\033[0m  %s（无 python3/jq）\n' "$(basename "$1")"
+        printf '  \033[33mskip\033[0m  %s (no python3/jq)\n' "$(basename "$1")"
     fi
 }
 check_json "$EXT/manifest.json"
 
-# ── 2. message type 一致性 ────────────────────────────────────────────
-section "2. background 注册的 handler 与调用方请求的一致"
+# ── 2. message type consistency ─────────────────────────────────────
+section "2. background handlers match caller requests"
 
-# background 里注册的类型
+# Types registered in background
 registered=$(sed -n 's/^listeners\.\([A-Za-z0-9_]*\)\s*=.*/\1/p' "$EXT/background.js" | sort -u)
-[ -n "$registered" ] && ok "background 注册了: $(echo $registered | tr '\n' ' ')"
+[ -n "$registered" ] && ok "background registers: $(echo $registered | tr '\n' ' ')"
 
-# popup.js / options.js 里 sendMessage 请求的类型
-called=$(grep -ho "type: *'[A-Za-z0-9_]*'" "$EXT/popup/popup.js" "$EXT/options/options.js" 2>/dev/null \
+# Types requested via sendMessage in popup.js / options.js.
+# Only lines containing sendMessage count: options.js also holds a
+# field-label map with `type: 'Type'` (conflict field display name), which is
+# not a message type. The Chinese text there never matched [A-Za-z0-9_], so
+# the English translation exposed this over-broad grep.
+called=$(grep -h "sendMessage" "$EXT/popup/popup.js" "$EXT/options/options.js" 2>/dev/null \
+    | grep -o "type: *'[A-Za-z0-9_]*'" \
     | sed "s/type: *'//;s/'//" | sort -u)
-if [ -n "$called" ]; then ok "界面请求了: $(echo $called | tr '\n' ' ')"; fi
+if [ -n "$called" ]; then ok "UI requests: $(echo $called | tr '\n' ' ')"; fi
 
 missing=""
 for m in $called; do
     echo "$registered" | grep -qx "$m" || missing="$missing $m"
 done
-[ -z "$missing" ] && ok "所有请求的 type 都有对应 handler" \
-    || bad "这些 type 没有 handler:$missing（点击后会返回 unknown message type）"
+[ -z "$missing" ] && ok "every requested type has a handler" \
+    || bad "these types have no handler:$missing (clicks return unknown message type)"
 
 unused=""
 for m in $registered; do
     echo "$called" | grep -qx "$m" || unused="$unused $m"
 done
-[ -z "$unused" ] || printf '  \033[33mnote\033[0m  这些 handler 目前没有界面在用:%s\n' "$unused"
+[ -z "$unused" ] || printf '  \033[33mnote\033[0m  handlers with no UI caller yet:%s\n' "$unused"
 
-# ── 3. import 的文件都存在 ────────────────────────────────────────────
-section "3. ES module import 的目标文件"
+# ── 3. imported files exist ─────────────────────────────────────────
+section "3. ES module import targets"
 bad_imports=0
 for f in "$EXT"/*.js "$EXT"/lib/*.js "$EXT"/popup/*.js "$EXT"/options/*.js; do
     [ -f "$f" ] || continue
     dir=$(dirname "$f")
-    # 提取相对 import：from './x' 与 import('./x')
-    # 用 grep -o 而不是 sed：sed 的 \x 转义在 BRE 里不可移植，Git Bash 会报
-    # "Unmatched ) or \" —— 那种报错完全指不到真正的问题。
+    # Extract relative imports: from './x' and import('./x')
+    # Use grep -o, not sed: sed \x escapes in BRE are not portable, and Git
+    # Bash fails with "Unmatched ) or " — pointing nowhere near the problem.
     for spec in $(grep -o "from *['\"]\(\.[^'\"]*\)['\"]" "$f" | sed "s/.*['\"]\(\.[^'\"]*\)['\"]/\1/" 2>/dev/null); do
         target="$dir/$spec"
         if [ ! -f "$target" ]; then
-            bad "$spec 在 $(basename "$f") 中被引用但不存在"
+            bad "$spec referenced in $(basename "$f") but missing"
             bad_imports=$((bad_imports+1))
         fi
     done
-    # 动态 import()
+    # Dynamic import()
     for spec in $(grep -o "import *(['\"]\(\.[^'\"]*\)['\"]" "$f" | sed "s/.*['\"]\(\.[^'\"]*\)['\"]/\1/" 2>/dev/null); do
         target="$dir/$spec"
         if [ ! -f "$target" ]; then
-            bad "动态 import 的 $spec 在 $(basename "$f") 中不存在"
+            bad "dynamic import $spec in $(basename "$f") is missing"
             bad_imports=$((bad_imports+1))
         fi
     done
 done
-[ "$bad_imports" -eq 0 ] && ok "所有 import 目标都存在"
+[ "$bad_imports" -eq 0 ] && ok "all import targets exist"
 
-# ── 4. HTML 的 id 与 JS 的 getElementById 一致 ────────────────────────
-section "4. HTML id 与 JS 引用一致"
+# ── 4. HTML ids match JS getElementById usage ───────────────────────
+section "4. HTML ids match JS references"
 check_ids() {
     html="$1"; js="$2"; name="$3"
-    # 字符类同样必须含 -：popup.html 里的 id 大多是连字符的
-    # （first-run / clock-warning / last-sync）。漏掉 - 的话 ids_html
-    # 会是空的，于是"全部存在"这个结论毫无意义。
+    # The char class must include -: popup.html ids are mostly hyphenated
+    # (first-run / clock-warning / last-sync). Without -, ids_html comes out
+    # empty and "everything exists" means nothing.
     grep -oE 'id="[A-Za-z0-9_-]+"' "$html" 2>/dev/null | sed 's/^id="//;s/"$//' | sort -u > "$W/ids_html"
 
-    # 两种取 id 的写法都要抓：popup/options 里写成了
-    # `const $ = (id) => document.getElementById(id)` 之后，调用处只剩
-    # $('sync')，只 grep getElementById 会一个都匹配不到，
-    # 静默变成 "skip" —— 看起来是"没检查"，实际是"检查失效"。
+    # Both id-fetch spellings must be caught: popup/options define
+    # `const $ = (id) => document.getElementById(id)`, so call sites read
+    # $('sync'); grepping only getElementById matches nothing and silently
+    # becomes "skip" — looking like "not checked" when it is "check broken".
     #
-    # 两个细节都是踩过坑的：
-    #   · $ 在 BRE 里是行尾锚点，必须用 -E 加 [\$] 字符类匹配字面量；
-    #   · 字符类必须包含 -（连字符）。用 [A-Za-z0-9_] 时，像
-    #     $('no-such-element') 这样的 id **匹配不上**，于是"检查通过"
-    #     只是因为压根没抓到 —— 是个假绿灯。
+    # Both details bit us before:
+    #   · $ is a BRE line anchor, match the literal with -E plus a [\$] class;
+    #   · the class must include - (hyphen). With [A-Za-z0-9_], ids like
+    #     $('no-such-element') **never match**, so "check passes" is a false green.
     {
         grep -oE "getElementById\('[A-Za-z0-9_-]+'\)" "$js" 2>/dev/null | sed "s/getElementById('//;s/')//"
         grep -oE "[\$]\('[A-Za-z0-9_-]+'\)" "$js" 2>/dev/null | sed "s/^[\$]('//;s/')$//"
     } | sort -u > "$W/ids_js"
 
     if [ ! -s "$W/ids_js" ]; then
-        printf '  \033[33mskip\033[0m  %s（未找到取 id 的调用）\n' "$name"
+        printf '  \033[33mskip\033[0m  %s (no id lookups found)\n' "$name"
         return 0
     fi
     n=$(wc -l < "$W/ids_js" | tr -d ' ')
     miss=$(comm -13 "$W/ids_html" "$W/ids_js")
     if [ -z "$miss" ]; then
-        ok "$name 引用的 $n 个 id 全部存在"
+        ok "$name: all $n referenced ids exist"
     else
-        bad "$name 中这些 id 在 HTML 里不存在:$miss"
+        bad "$name references ids missing from HTML:$miss"
     fi
 }
 check_ids "$EXT/popup/popup.html" "$EXT/popup/popup.js" "popup"
 check_ids "$EXT/options/options.html" "$EXT/options/options.js" "options"
 
-# ── 5. manifest 引用了实际存在的文件 ─────────────────────────────────
-section "5. manifest 引用的文件都存在"
+# ── 5. manifest points at real files ────────────────────────────────
+section "5. manifest references exist"
 missing_manifest=""
 for f in $(sed -n 's/.*"default_popup": *"\([^"]*\)".*/\1/p' "$EXT/manifest.json") \
          $(sed -n 's/.*"page": *"\([^"]*\)".*/\1/p' "$EXT/manifest.json"); do
     [ -f "$EXT/$f" ] || missing_manifest="$missing_manifest $f"
 done
-[ -z "$missing_manifest" ] && ok "manifest 指向的页面都存在" \
-    || bad "manifest 指向这些不存在的文件:$missing_manifest"
+[ -z "$missing_manifest" ] && ok "manifest pages all exist" \
+    || bad "manifest points at missing files:$missing_manifest"
 
-# ── 6. 根目录 id 与 Go 端一致 ────────────────────────────────────────
-section "6. 根目录常量与 Go 端一致"
+# ── 6. root ids match the C# side ───────────────────────────────────
+section "6. Root constants match the C# side"
 for pair in "ROOT_TOOLBAR:toolbar_____" "ROOT_MENU:menu________" \
             "ROOT_UNFILED:unfiled_____" "ROOT_MOBILE:mobile______"; do
     name="${pair%%:*}"; want="${pair#*:}"
@@ -157,57 +162,57 @@ for pair in "ROOT_TOOLBAR:toolbar_____" "ROOT_MENU:menu________" \
     if [ "$got" = "$want" ]; then
         ok "$name = $want"
     else
-        bad "$name 不一致：JS=$got 期望=$want"
+        bad "$name differs: JS=$got expected=$want"
     fi
 done
 
-# Go 端常量所在的源文件。代码分成了 cmd/ + internal/ 三层，
-# 这两个常量都在 internal/bookmarks/ 里 —— 与 hlc.js / collect.js 对应。
+# C# source tree. Code is split into src/ projects; both constants live in
+# BookmarkSync.Domain — the counterpart of hlc.js / collect.js.
 CS_SRC="$script_dir/../bmsync/src/BookmarkSync.Domain"
 CS_HLC="$CS_SRC/Hlc.cs"
 CS_STATE="$CS_SRC/State.cs"
 
-# 先确认文件在：路径写错时 sed 会静默返回空串，后面的比较会给出
-# "两端不一致"这种误导性的错误信息。宁可直接停在这里。
+# Confirm the files are there first: a wrong path makes sed silently return
+# empty, and the comparison below would misreport "sides disagree". Stop here.
 if [ ! -f "$CS_HLC" ] || [ ! -f "$CS_STATE" ]; then
-    bad "找不到 C# 源码：$CS_HLC / $CS_STATE —— 目录结构变了？需同步更新本脚本"
-    printf '\n\033[1m结果: %d 通过, %d 失败\033[0m\n' "$pass" "$fail"
+    bad "C# sources not found: $CS_HLC / $CS_STATE — layout changed? update this script"
+    printf '\n\033[1mResult: %d passed, %d failed\033[0m\n' "$pass" "$fail"
     exit 1
 fi
 
-# ── 7. C# 端 HLC 常量与 JS 端一致 ────────────────────────────────────
-section "7. HLC 编码格式两端一致"
+# ── 7. HLC constants match across sides ─────────────────────────────
+section "7. HLC encoding matches across sides"
 cs_digits=$(sed -n 's/.*PhysicalDigits *= *\([0-9]*\).*/\1/p' "$CS_HLC")
 cs_cdigits=$(sed -n 's/.*CounterDigits *= *\([0-9]*\).*/\1/p' "$CS_HLC")
 js_digits=$(sed -n 's/.*PHYSICAL_DIGITS *= *\([0-9]*\).*/\1/p' "$EXT/lib/hlc.js")
 js_cdigits=$(sed -n 's/.*COUNTER_DIGITS *= *\([0-9]*\).*/\1/p' "$EXT/lib/hlc.js")
 if [ -n "$cs_digits" ] && [ "$cs_digits" = "$js_digits" ] && [ "$cs_cdigits" = "$js_cdigits" ]; then
-    ok "物理位=$cs_digits 计数位=$cs_cdigits（两端一致）"
+    ok "physical digits=$cs_digits counter digits=$cs_cdigits (both sides match)"
 else
-    bad "HLC 位宽不一致 C#=($cs_digits,$cs_cdigits) JS=($js_digits,$js_cdigits)"
+    bad "HLC widths differ C#=($cs_digits,$cs_cdigits) JS=($js_digits,$js_cdigits)"
 fi
 
-# ── 8. schema 版本两端一致 ───────────────────────────────────────────
-section "8. schema 版本两端一致"
+# ── 8. schema versions match across sides ───────────────────────────
+section "8. Schema versions match across sides"
 cs_v=$(sed -n 's/.*public const int Version *= *\([0-9]*\).*/\1/p' "$CS_STATE")
 js_v=$(sed -n 's/^export const SCHEMA_VERSION *= *\([0-9]*\).*/\1/p' "$EXT/lib/collect.js")
 if [ "$cs_v" = "$js_v" ] && [ -n "$cs_v" ]; then
-    ok "schema v$cs_v（两端一致）"
+    ok "schema v$cs_v (both sides match)"
 else
-    bad "schema 版本不一致 C#='$cs_v' JS='$js_v' —— 同步会被服务端以 400 拒绝"
+    bad "schema versions differ C#='$cs_v' JS='$js_v' — sync will be rejected with 400"
 fi
 
-# ── 9. 四个系统根目录常量两端一致 ────────────────────────────────────
-# 根目录 id 是硬编码字符串，grep 比对比运行任何测试都直接：
-# 它在检查器启动的第一秒就给出结论，而不必先装好 .NET SDK。
-section "9. 根目录常量两端一致"
+# ── 9. system root constants match across sides ─────────────────────
+# Root ids are hardcoded strings; grepping beats running any test:
+# the checker answers in its first second without a .NET SDK.
+section "9. Root constants match across sides"
 for rid in toolbar_____ menu________ unfiled_____ mobile______; do
     if grep -q "\"$rid\"" "$CS_STATE" && grep -q "'$rid'" "$EXT/lib/keys.js"; then
-        ok "$rid 两端一致"
+        ok "$rid matches on both sides"
     else
-        bad "根目录 id $rid 在 C# 或 JS 端缺失"
+        bad "root id $rid missing on the C# or JS side"
     fi
 done
 
-printf '\n\033[1m结果: %d 通过, %d 失败\033[0m\n' "$pass" "$fail"
+printf '\n\033[1mResult: %d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

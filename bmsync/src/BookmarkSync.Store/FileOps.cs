@@ -3,45 +3,46 @@ using System.Runtime.InteropServices;
 namespace BookmarkSync.Store;
 
 /// <summary>
-/// 平台相关的文件操作：原子替换与"瞬时错误"识别。
+/// Platform-specific file operations: atomic replace and transient-error detection.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>为什么需要重试</b>：Linux 上 <c>rename(2)</c> 在同一文件系统内是原子的，
-/// 不会被别的进程"占用"。<b>Windows 不同</b>：MoveFileEx 会因为杀毒软件、索引器、
-/// 编辑器等短暂持有文件句柄而返回 ACCESS_DENIED / SHARING_VIOLATION。
-/// 这些占用通常只持续几毫秒，重试即可成功。
+/// <b>Why retry</b>: on Linux, <c>rename(2)</c> within one filesystem is atomic
+/// and never "busy". <b>Windows differs</b>: MoveFileEx can return
+/// ACCESS_DENIED / SHARING_VIOLATION because antivirus, indexers, or editors
+/// briefly hold the file. Such holds last milliseconds; retry succeeds.
 /// </para>
 /// <para>
-/// 这个 bug 在 100 次并发写的测试里稳定复现（每次约丢一个更新），但线上
-/// 只在低频触发时才会被用户注意到 —— 表现是"偶尔同步失败，重试就好"。
+/// The bug reproduced stably in a 100-way concurrent-write test (about one
+/// lost update per run) but appears online only as "occasional sync failure,
+/// retry fixes it".
 /// </para>
 /// <para>
-/// <b>为什么手写而不用 File.Move 的重试</b>：.NET 的 <c>File.Move</c> 在
-/// Windows 上遇到占用会直接抛异常，不重试。包一层比让每个调用点自己写
-/// 循环可靠得多。
+/// <b>Why hand-rolled instead of File.Move retry</b>: .NET File.Move throws on
+/// Windows contention without retrying. One wrapper beats a loop at every
+/// call site.
 /// </para>
 /// </remarks>
 public static class FileOps
 {
-    // Windows 错误码（来自 winerror.h）。
-    // 之所以手写常量：这些码不在 .NET 的公开异常类型里，
-    // 只能从 HResult 的低位取出来。
+    // Windows error codes (from winerror.h). Hard-coded because they are not
+    // exposed as .NET exception types; only visible in the low bits of HResult.
     private const int ErrorAccessDenied = 5;
     private const int ErrorSharingViolation = 32;
     private const int ErrorLockViolation = 33;
-    private const int ErrorStaleFileHandle = 116; // ESTALE，Linux 专用
+    private const int ErrorStaleFileHandle = 116; // ESTALE, Linux only
 
     /// <summary>
-    /// 判断错误是否属于"稍后重试就好"的那一类。
+    /// Returns true for errors worth retrying shortly.
     /// </summary>
     /// <remarks>
-    /// 权限类错误在两个平台都视为可重试 —— 注意这看起来很反直觉
-    /// （权限错误不是应该直接失败吗？），但在 Windows 上"权限被拒"最常见的
-    /// 原因就是别的进程短暂持有文件句柄，而不是真的 ACL 有问题。
+    /// Treating permission errors as retryable looks counter-intuitive, but on
+    /// Windows the most common "access denied" cause is a transient hold by
+    /// another process, not a real ACL problem.
     /// <para>
-    /// 不相关的错误（如磁盘满、路径不存在）不重试：白等 5 次只会让
-    /// 一次确定性失败变成 31ms 的确定性失败。
+    /// Unrelated errors (disk full, missing path) are not retried: waiting
+    /// through 5 attempts would turn a deterministic failure into a 31 ms
+    /// deterministic failure.
     /// </para>
     /// </remarks>
     public static bool IsTransientFileError(Exception? ex)
@@ -56,19 +57,19 @@ public static class FileOps
 
             case DirectoryNotFoundException:
             case FileNotFoundException:
-                // 路径不存在是确定性错误，重试没有意义
+                // Deterministic: retrying a missing path is pointless.
                 return false;
         }
 
-        for (Exception? cur = ex; cur is not null; cur = cur.InnerException)
+        for (Exception? current = ex; current is not null; current = current.InnerException)
         {
-            if (cur is not IOException && cur is not UnauthorizedAccessException)
+            if (current is not IOException && current is not UnauthorizedAccessException)
             {
                 continue;
             }
 
-            // HResult 的低 16 位是 Win32 错误码（0x8007xxxx 形式）
-            int win32 = cur.HResult & 0xFFFF;
+            // Low 16 bits of HResult hold the Win32 code (0x8007xxxx form).
+            int win32 = current.HResult & 0xFFFF;
             if (win32 is ErrorAccessDenied or ErrorSharingViolation or ErrorLockViolation)
             {
                 return true;
@@ -84,34 +85,36 @@ public static class FileOps
     }
 
     /// <summary>
-    /// 原子替换文件，遇到瞬时占用时指数退避重试。
+    /// Atomically replaces a file with exponential-backoff retry on transient holds.
     /// </summary>
-    /// <param name="attempts">总尝试次数。1 表示不重试。</param>
-    /// <returns>成功返回 true；确定性失败立即返回 false（不浪费时间）。</returns>
-    public static bool RenameWithRetry(string oldPath, string newPath, int attempts, out Exception? lastError)
+    /// <param name="sourcePath">Staging file to move into place.</param>
+    /// <param name="destPath">Final path (replaced atomically).</param>
+    /// <param name="attempts">Total attempts. 1 means no retry.</param>
+    /// <returns>True on success; deterministic failures return false immediately.</returns>
+    public static bool RenameWithRetry(string sourcePath, string destPath, int attempts, out Exception? lastError)
     {
         lastError = null;
 
-        for (int i = 0; i < attempts; i++)
+        for (int attemptIndex = 0; attemptIndex < attempts; attemptIndex++)
         {
             try
             {
-                // overwrite: true 走 MoveFileEx(MOVEFILE_REPLACE_EXISTING)，
-                // 语义与 Go 的 os.Rename 一致（目标存在时替换）。
-                File.Move(oldPath, newPath, overwrite: true);
+                // overwrite: true maps to MoveFileEx(MOVEFILE_REPLACE_EXISTING),
+                // same semantics as Go os.Rename (replace when target exists).
+                File.Move(sourcePath, destPath, overwrite: true);
                 return true;
             }
             catch (Exception ex) when (IsTransientFileError(ex))
             {
                 lastError = ex;
-                if (i < attempts - 1)
+                if (attemptIndex < attempts - 1)
                 {
-                    Thread.Sleep(TimeSpan.FromMilliseconds(1 << i));
+                    Thread.Sleep(TimeSpan.FromMilliseconds(1 << attemptIndex));
                 }
             }
             catch (Exception ex)
             {
-                // 确定性错误：立刻返回，不重试
+                // Deterministic error: return immediately, no retry.
                 lastError = ex;
                 return false;
             }
@@ -121,8 +124,9 @@ public static class FileOps
     }
 
     /// <summary>
-    /// 尽力把目录项刷盘。它在 Linux 上有效，但在 Windows 上对目录做
-    /// fsync 会直接失败 —— 那只是少一层保险，原子性仍由 rename 保证。
+    /// Best-effort directory fsync. Effective on Linux; on Windows, fsync on a
+    /// directory fails — that only drops one durability layer, atomicity still
+    /// comes from rename.
     /// </summary>
     public static void TrySyncDir(string dir)
     {
@@ -133,7 +137,7 @@ public static class FileOps
         }
         catch
         {
-            // 见方法说明：这是"少一层保险"，不是错误。
+            // Best effort by design, not an error.
         }
     }
 }

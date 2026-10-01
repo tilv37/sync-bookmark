@@ -1,14 +1,16 @@
-// background.js —— 入口：消息路由、badge 状态、同步编排
+// background.js — entry: message routing, badge state, sync orchestration
 //
-// ⚠️ Firefox MV3 的 background.scripts 是**经典脚本**，不支持 import/export
-//    语法。需要用到 ES module 时，一律走动态 import()。
-//    （`background.type: "module"` 要 Firefox 121+，本项目基线是 115。）
+// WARNING: Firefox MV3 background.scripts are **classic scripts** without
+// import/export support. Anything needing ES modules must go through dynamic
+// import(). (`background.type: "module"` needs Firefox 121+; this project
+// baselines 115.)
 //
-// ── 同步互斥 ──────────────────────────────────────────────────────────
+// ── Sync mutex ────────────────────────────────────────────────────────
 //
-// 正在进行中的同步再次触发时直接忽略并返回"进行中"，而不是排队。
-// 合并本身是幂等的，所以排队也不会破坏数据 —— 但两次同步同时跑会让
-// badge 状态和用户的心智对不上（用户看到"完成"其实是第一次的结果）。
+// A second trigger while sync is in flight is ignored with an "in progress"
+// reply instead of queueing. Merging is idempotent so queueing would not
+// corrupt data — but two concurrent runs desync badge state from the user's
+// mental model (the user sees "done" that belongs to the first run).
 
 /** @type {Record<string, (msg: any) => Promise<any> | any>} */
 const listeners = Object.create(null);
@@ -41,7 +43,7 @@ async function setBadge(state) {
     await browser.action.setBadgeText({ text: state.text });
     await browser.action.setBadgeBackgroundColor({ color: state.color });
   } catch {
-    // 扩展被卸载/重载时这里会抛，忽略即可 —— 那时本来就不该再更新 UI
+    // Throws when the extension is unloaded/reloaded — no UI left to update anyway
   }
 }
 
@@ -51,14 +53,14 @@ function flash(state, ms = 3000) {
   flashTimer = setTimeout(() => setBadge(BADGE.idle), ms);
 }
 
-/** 惰性加载 ES module（lib/ 下的代码全部是 ESM）。 */
+/** Lazily load an ES module (everything under lib/ is ESM). */
 function load(path) {
   return import(browser.runtime.getURL(path));
 }
 
 listeners.sync = async () => {
   if (inFlight) {
-    return { ok: false, error: '同步进行中，请稍候' };
+    return { ok: false, error: 'Sync already in progress, please wait' };
   }
 
   setBadge(BADGE.syncing);
@@ -96,7 +98,7 @@ listeners.testConnection = async (msg) => {
   try {
     const granted = await hasHostPermission(msg.serverUrl);
     if (!granted) {
-      return { ok: false, error: `尚未获得访问 ${msg.serverUrl} 的权限——权限申请必须由设置页的点击手势发起，请确认设置页已更新（about:debugging 点重新加载）后再点测试连接` };
+      return { ok: false, error: `No permission to access ${msg.serverUrl} yet — permission must be granted from a settings-page click. Reload the extension (about:debugging) and click Test connection again` };
     }
     const data = await healthCheck(msg.serverUrl);
     return { ok: true, data };
@@ -108,9 +110,9 @@ listeners.testConnection = async (msg) => {
 listeners.getConflicts = async (msg) => {
   const { fetchConflicts } = await load('lib/client.js');
   const { loadSettings } = await load('lib/store.js');
-  const s = await loadSettings();
+  const settings = await loadSettings();
   try {
-    const data = await fetchConflicts({ serverUrl: s.serverUrl, token: s.token, limit: msg?.limit ?? 50 });
+    const data = await fetchConflicts({ serverUrl: settings.serverUrl, token: settings.token, limit: msg?.limit ?? 50 });
     return { ok: true, conflicts: data.conflicts || [], total: data.total ?? 0 };
   } catch (err) {
     return { ok: false, error: (err && err.message) || String(err) };
@@ -120,9 +122,9 @@ listeners.getConflicts = async (msg) => {
 listeners.getHistory = async () => {
   const { fetchHistory } = await load('lib/client.js');
   const { loadSettings } = await load('lib/store.js');
-  const s = await loadSettings();
+  const settings = await loadSettings();
   try {
-    const data = await fetchHistory({ serverUrl: s.serverUrl, token: s.token });
+    const data = await fetchHistory({ serverUrl: settings.serverUrl, token: settings.token });
     return { ok: true, snapshots: data.snapshots || [] };
   } catch (err) {
     return { ok: false, error: (err && err.message) || String(err) };
@@ -142,6 +144,6 @@ listeners.resetCache = async () => {
   return { ok: true };
 };
 
-// 浏览器重启后清掉可能残留的 badge（事件页是非持久的，正常不会残留，
-// 但扩展热重载时可能留下）。
+// Clear a possibly stale badge after a browser restart (the event page is
+// non-persistent so it normally cannot linger, but hot reloads can leave one).
 setBadge(BADGE.idle);

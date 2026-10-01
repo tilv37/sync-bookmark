@@ -1,21 +1,21 @@
 namespace BookmarkSync.Domain.Tests;
 
 /// <summary>
-/// 合并算法的单元测试，逐条对应
-/// 合并算法的测试用例（服务端从 Go 迁移到 .NET 10 时逐条移植）。
+/// Unit tests for the merge algorithm, mirroring the merge-algorithm test cases
+/// one by one (ported when the server moved from Go to .NET 10).
 /// </summary>
 /// <remarks>
-/// 这个文件是整个项目里最重要的测试：合并出错的表现是<b>静默丢书签、
-/// 用户完全无感</b>，所以除了逐条覆盖分支，最后还有一条随机化收敛测试。
+/// This is the most important test file in the project: merge bugs show as <b>silently lost
+/// bookmarks the user never notices</b>, so beyond branch-by-branch coverage there is a final randomized convergence test.
 /// </remarks>
 public class MergeTests
 {
     private static readonly string K = Fixtures.KeyOf("b");
 
-    // ── 基础合并 ──────────────────────────────────────────────────────
+    // ── Basic merge ─────────────────────────────────────────────────────
 
     [Fact]
-    public void 两侧都空()
+    public void BothSidesEmpty()
     {
         MergeResult r = Merger.Merge(State.New(), State.New(), null, Fixtures.DeviceA, Fixtures.T0);
 
@@ -24,12 +24,12 @@ public class MergeTests
     }
 
     [Fact]
-    public void 服务端为空客户端有数据()
+    public void ServerEmptyClientHasData()
     {
-        // 工作电脑第一次同步：本地有书签，云端还是空的
+        // Work machine syncing first: local bookmarks, empty cloud
         State incoming = Fixtures.StateOf(
-            ("f1", Fixtures.Folder(RootFolders.Toolbar, "工作", 100, 0)),
-            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f1"), "示例", "https://example.com", 100, 1)));
+            ("f1", Fixtures.Folder(RootFolders.Toolbar, "Work", 100, 0)),
+            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f1"), "Example", "https://example.com", 100, 1)));
 
         MergeResult r = Merger.Merge(State.New(), incoming, null, Fixtures.DeviceB, Fixtures.T0);
 
@@ -39,11 +39,11 @@ public class MergeTests
     }
 
     [Fact]
-    public void 客户端为空服务端保留全部()
+    public void ClientEmptyServerKeepsAll()
     {
-        // 云端有数据，另一台设备本地什么都没有（例如换了新 profile）
+        // Cloud has data, another device has nothing local (e.g. fresh profile)
         State server = Fixtures.StateOf(
-            ("b1", Fixtures.Bookmark(RootFolders.Unfiled, "示例", "https://example.com", 100, 0)));
+            ("b1", Fixtures.Bookmark(RootFolders.Unfiled, "Example", "https://example.com", 100, 0)));
 
         MergeResult r = Merger.Merge(server, State.New(), null, Fixtures.DeviceB, Fixtures.T0);
 
@@ -53,7 +53,7 @@ public class MergeTests
     }
 
     [Fact]
-    public void 两侧互不相交()
+    public void DisjointSidesMerge()
     {
         State server = Fixtures.StateOf(
             ("a", Fixtures.Bookmark(RootFolders.Toolbar, "A", "https://a.example", 100, 0)));
@@ -68,10 +68,10 @@ public class MergeTests
     }
 
     [Fact]
-    public void LWW_较新者胜()
+    public void Lww_NewerWins()
     {
-        Item older = Fixtures.Bookmark(RootFolders.Toolbar, "旧标题", "https://example.com", 100, 0);
-        Item newer = Fixtures.Bookmark(RootFolders.Toolbar, "新标题", "https://example.com", 200, 0);
+        Item older = Fixtures.Bookmark(RootFolders.Toolbar, "Old title", "https://example.com", 100, 0);
+        Item newer = Fixtures.Bookmark(RootFolders.Toolbar, "New title", "https://example.com", 200, 0);
 
         State s = State.New();
         s.Items[K] = older;
@@ -79,15 +79,15 @@ public class MergeTests
         i.Items[K] = newer;
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
-        Assert.Equal("新标题", r.State.Items[K].N);
+        Assert.Equal("New title", r.State.Items[K].N);
         Assert.Equal(1, r.Summary.Updated);
     }
 
     [Fact]
-    public void LWW_服务端较新也胜()
+    public void Lww_NewerServerSideWins()
     {
-        Item older = Fixtures.Bookmark(RootFolders.Toolbar, "旧标题", "https://example.com", 100, 0);
-        Item newer = Fixtures.Bookmark(RootFolders.Toolbar, "新标题", "https://example.com", 200, 0);
+        Item older = Fixtures.Bookmark(RootFolders.Toolbar, "Old title", "https://example.com", 100, 0);
+        Item newer = Fixtures.Bookmark(RootFolders.Toolbar, "New title", "https://example.com", 200, 0);
 
         State s = State.New();
         s.Items[K] = newer;
@@ -95,13 +95,13 @@ public class MergeTests
         i.Items[K] = older;
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
-        Assert.Equal("新标题", r.State.Items[K].N);
+        Assert.Equal("New title", r.State.Items[K].N);
     }
 
     [Fact]
-    public void 时间戳相同且内容相同原样保留()
+    public void SameTimestampSameContentKept()
     {
-        Item it = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 3);
+        Item it = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 3);
         State s = State.New();
         s.Items[K] = it;
         State i = State.New();
@@ -115,7 +115,7 @@ public class MergeTests
     }
 
     [Fact]
-    public void 时间戳相同内容不同必须确定()
+    public void SameTimestampDifferentContentIsDeterministic()
     {
         State s = State.New();
         State i = State.New();
@@ -134,12 +134,12 @@ public class MergeTests
         Assert.Single(r0.Conflicts);
     }
 
-    // ── 删除与墓碑 ────────────────────────────────────────────────────
+    // ── Deletes and tombstones ────────────────────────────────────────────
 
     [Fact]
-    public void 删除会传播()
+    public void DeletePropagates()
     {
-        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0);
+        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0);
         Item dead = Fixtures.Tomb(alive, Fixtures.T0, 200, 0);
 
         State s = State.New();
@@ -149,17 +149,17 @@ public class MergeTests
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
 
-        Assert.True(r.State.Items[K].D, "客户端的删除（较新）没有传播到服务端状态");
+        Assert.True(r.State.Items[K].D, "newer client delete did not propagate to server state");
         Assert.Equal(1, r.Summary.Deleted);
     }
 
     [Fact]
-    public void 较旧的删除输给较新的修改()
+    public void OlderDeleteLosesToNewerEdit()
     {
-        // 设备 A 删了书签，设备 B 在此之后又改了这个书签（说明它还在用）
+        // Device A deleted the bookmark, device B edited it afterwards (still in use)
         Item dead = Fixtures.Tomb(
-            Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0), Fixtures.T0, 100, 0);
-        Item revived = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 200, 0);
+            Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0), Fixtures.T0, 100, 0);
+        Item revived = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 200, 0);
 
         State s = State.New();
         State i = State.New();
@@ -167,32 +167,32 @@ public class MergeTests
         i.Items[K] = revived;
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
-        Assert.False(r.State.Items[K].D, "较旧的删除不应覆盖较新的修改");
+        Assert.False(r.State.Items[K].D, "older delete must not overwrite newer edit");
     }
 
     [Fact]
-    public void 两侧都是墓碑()
+    public void BothSidesTombstones()
     {
-        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0);
+        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0);
         State s = State.New();
         State i = State.New();
         s.Items[K] = Fixtures.Tomb(alive, Fixtures.T0, 200, 0);
-        i.Items[K] = Fixtures.Tomb(alive, Fixtures.T0, 100, 0); // 较旧的删除
+        i.Items[K] = Fixtures.Tomb(alive, Fixtures.T0, 100, 0); // older delete
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
         Item got = r.State.Items[K];
 
-        Assert.True(got.D, "两侧都是墓碑，结果必须是墓碑");
+        Assert.True(got.D, "both sides tombstoned, result must be a tombstone");
         Assert.Equal(Hlc.Encode(200, 0), got.M);
-        // x 保留较早的那个：GC 按 x 判定，越早清理越省空间
+        // x keeps the earlier one: GC decides by x, earlier reaping saves more space
         Assert.Equal(Fixtures.T0, got.X);
     }
 
     [Fact]
-    public void 较新的重新添加让书签复活()
+    public void NewerReaddResurrects()
     {
-        // 墓碑 + 客户端以更新的时间戳重新添加同一 URL → 书签复活
-        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0);
+        // Tombstone + client re-adds the same URL with a newer timestamp -> resurrected
+        Item alive = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0);
 
         State s = State.New();
         State i = State.New();
@@ -201,56 +201,56 @@ public class MergeTests
 
         MergeResult r = Merger.Merge(s, i, null, Fixtures.DeviceB, Fixtures.T0);
 
-        Assert.False(r.State.Items[K].D, "较新的重新添加应让书签复活");
-        Assert.Equal("标题", r.State.Items[K].N);
+        Assert.False(r.State.Items[K].D, "newer re-add should resurrect the bookmark");
+        Assert.Equal("Title", r.State.Items[K].N);
     }
 
-    // ── 幂等性与收敛性 ────────────────────────────────────────────────
+    // ── Idempotency and convergence ────────────────────────────────────────
 
     /// <summary>
-    /// 重复同步同一个请求，结果必须完全一致。
-    /// 这是"用户连点三次同步按钮"不会把书签搞乱的前提。
+    /// Syncing the same request repeatedly must produce identical results.
+    /// This is what keeps "the user hammering sync three times" from corrupting bookmarks.
     /// </summary>
     [Fact]
-    public void 幂等()
+    public void IsIdempotent()
     {
         State server = Fixtures.StateOf(
-            ("f", Fixtures.Folder(RootFolders.Toolbar, "目录", 100, 0)),
-            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "一", "https://one.example", 100, 1)),
+            ("f", Fixtures.Folder(RootFolders.Toolbar, "Folder", 100, 0)),
+            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "One", "https://one.example", 100, 1)),
             ("b2", Fixtures.Tomb(
-                Fixtures.Bookmark(RootFolders.Toolbar, "二", "https://two.example", 100, 0), Fixtures.T0, 100, 2)));
+                Fixtures.Bookmark(RootFolders.Toolbar, "Two", "https://two.example", 100, 0), Fixtures.T0, 100, 2)));
         State incoming = Fixtures.StateOf(
-            ("f", Fixtures.Folder(RootFolders.Toolbar, "目录", 100, 0)),
-            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "一改", "https://one.example", 200, 0)),
-            ("b3", Fixtures.Bookmark(RootFolders.Menu, "三", "https://three.example", 200, 1)),
+            ("f", Fixtures.Folder(RootFolders.Toolbar, "Folder", 100, 0)),
+            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "One edited", "https://one.example", 200, 0)),
+            ("b3", Fixtures.Bookmark(RootFolders.Menu, "Three", "https://three.example", 200, 1)),
             ("b2", Fixtures.Tomb(
-                Fixtures.Bookmark(RootFolders.Toolbar, "二", "https://two.example", 100, 0), Fixtures.T0, 100, 2)));
+                Fixtures.Bookmark(RootFolders.Toolbar, "Two", "https://two.example", 100, 0), Fixtures.T0, 100, 2)));
 
         State once = Merger.Merge(server, incoming, null, Fixtures.DeviceB, Fixtures.T0).State;
         for (int n = 0; n < 5; n++)
         {
             State again = Merger.Merge(server, incoming, null, Fixtures.DeviceB, Fixtures.T0).State;
-            Assert.True(Fixtures.SameStates(once, again), $"第 {n + 1} 次重复同步结果不同");
+            Assert.True(Fixtures.SameStates(once, again), $"repeat sync #{n + 1} diverged");
         }
 
-        // 把结果再当服务端、拿同一个请求合并一次，也不应变化
+        // Merging again with the result as server and the same request must be a no-op
         State twice = Merger.Merge(once, incoming, null, Fixtures.DeviceB, Fixtures.T0).State;
-        Assert.True(Fixtures.SameStates(once, twice), "以合并结果为服务端再次合并，结果发生了变化");
+        Assert.True(Fixtures.SameStates(once, twice), "re-merging with the merged result as server changed the outcome");
     }
 
-    /// <summary>乱序同步最终必须收敛：无论 A、B 的到达顺序如何，服务端的权威状态相同。</summary>
+    /// <summary>Out-of-order syncs must converge: whatever order A and B arrive in, the authoritative server state is the same.</summary>
     [Fact]
-    public void 乱序也收敛()
+    public void OutOfOrderConverges()
     {
         State b = Fixtures.StateOf(
-            ("f", Fixtures.Folder(RootFolders.Toolbar, "目录", 100, 0)),
-            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "一", "https://one.example", 100, 1)),
-            ("b2", Fixtures.Bookmark(RootFolders.Unfiled, "二", "https://two.example", 100, 2)));
+            ("f", Fixtures.Folder(RootFolders.Toolbar, "Folder", 100, 0)),
+            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "One", "https://one.example", 100, 1)),
+            ("b2", Fixtures.Bookmark(RootFolders.Unfiled, "Two", "https://two.example", 100, 2)));
         State patchA = Fixtures.StateOf(
-            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "一改", "https://one.example", 300, 0)),
-            ("b3", Fixtures.Bookmark(RootFolders.Unfiled, "三", "https://three.example", 250, 0)));
+            ("b1", Fixtures.Bookmark(Fixtures.KeyOf("f"), "One edited", "https://one.example", 300, 0)),
+            ("b3", Fixtures.Bookmark(RootFolders.Unfiled, "Three", "https://three.example", 250, 0)));
         State patchB = Fixtures.StateOf(
-            ("b2", Fixtures.Bookmark(RootFolders.Unfiled, "二改", "https://two.example", 400, 0)));
+            ("b2", Fixtures.Bookmark(RootFolders.Unfiled, "Two edited", "https://two.example", 400, 0)));
 
         State ab = Merger.Merge(
             Merger.Merge(b, patchA, null, Fixtures.DeviceA, Fixtures.T0).State,
@@ -261,67 +261,67 @@ public class MergeTests
 
         Assert.True(
             Fixtures.SameStates(ab, ba),
-            $"A→B 与 B→A 顺序结果不一致：\n AB: {Describe(ab)}\n BA: {Describe(ba)}");
+            $"A-then-B vs B-then-A diverged:\n AB: {Describe(ab)}\n BA: {Describe(ba)}");
 
         Assert.Equal(4, ab.Items.Count);
-        Assert.Equal("二改", ab.Items[Fixtures.KeyOf("b2")].N);
-        Assert.Equal("三", ab.Items[Fixtures.KeyOf("b3")].N);
+        Assert.Equal("Two edited", ab.Items[Fixtures.KeyOf("b2")].N);
+        Assert.Equal("Three", ab.Items[Fixtures.KeyOf("b3")].N);
     }
 
     private static string Describe(State s) =>
         string.Join(", ", s.KeysSorted().Select(k => $"{k[..4]}={s.Items[k].N}({s.Items[k].M})"));
 
-    // ── 冲突检测 ──────────────────────────────────────────────────────
+    // ── Conflict detection ──────────────────────────────────────────────
 
     /// <summary>
-    /// 首次同步（base 为空）绝不能报冲突，否则用户第一次点同步就被
-    /// 一屏冲突记录淹没，这个功能就废了。
+    /// A first sync (empty base) must never report conflicts, or the user's first sync
+    /// would drown in conflict records and the feature would be useless.
     /// </summary>
     [Fact]
-    public void base为空时不报冲突()
+    public void NoConflictWhenBaseEmpty()
     {
         State server = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "云端标题", "https://example.com", 200, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Cloud title", "https://example.com", 200, 0)));
         State incoming = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "本地标题", "https://example.com", 100, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Local title", "https://example.com", 100, 0)));
 
         MergeResult r = Merger.Merge(server, incoming, null, Fixtures.DeviceB, Fixtures.T0);
 
         Assert.Empty(r.Conflicts);
-        Assert.Equal("云端标题", r.State.Items[K].N);
+        Assert.Equal("Cloud title", r.State.Items[K].N);
     }
 
     [Fact]
-    public void 单边编辑不是冲突()
+    public void SingleSidedEditIsNotConflict()
     {
-        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "原标题", "https://example.com", 100, 0);
+        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "Original title", "https://example.com", 100, 0);
         var baseMap = new Dictionary<string, string>(StringComparer.Ordinal) { [K] = orig.M };
 
-        // 只有客户端改
+        // Only the client changed
         MergeResult r1 = Merger.Merge(
             Fixtures.StateOf(("b", orig)),
-            Fixtures.StateOf(("b", Fixtures.Bookmark(RootFolders.Toolbar, "新标题", "https://example.com", 300, 0))),
+            Fixtures.StateOf(("b", Fixtures.Bookmark(RootFolders.Toolbar, "New title", "https://example.com", 300, 0))),
             baseMap, Fixtures.DeviceB, Fixtures.T0);
         Assert.Empty(r1.Conflicts);
 
-        // 只有服务端改
+        // Only the server changed
         MergeResult r2 = Merger.Merge(
-            Fixtures.StateOf(("b", Fixtures.Bookmark(RootFolders.Toolbar, "云端改", "https://example.com", 300, 0))),
+            Fixtures.StateOf(("b", Fixtures.Bookmark(RootFolders.Toolbar, "Cloud edit", "https://example.com", 300, 0))),
             Fixtures.StateOf(("b", orig)),
             baseMap, Fixtures.DeviceB, Fixtures.T0);
         Assert.Empty(r2.Conflicts);
     }
 
     [Fact]
-    public void 检出真正的并发编辑()
+    public void DetectsTrueConcurrentEdit()
     {
-        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "原标题", "https://example.com", 100, 0);
+        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "Original title", "https://example.com", 100, 0);
         var baseMap = new Dictionary<string, string>(StringComparer.Ordinal) { [K] = orig.M };
 
         State server = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "云端改的", "https://example.com", 300, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Cloud edit", "https://example.com", 300, 0)));
         State incoming = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "本地改的", "https://example.com", 200, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Local edit", "https://example.com", 200, 0)));
 
         MergeResult r = Merger.Merge(server, incoming, baseMap, Fixtures.DeviceB, Fixtures.T0);
 
@@ -330,28 +330,28 @@ public class MergeTests
         Assert.Equal("title", c.Field);
         Assert.Equal(ConflictWinners.Server, c.Winner);
         Assert.Equal(Fixtures.DeviceB, c.Loser);
-        Assert.Equal("云端改的", c.WinnerValue);
-        Assert.Equal("本地改的", c.LoserValue);
+        Assert.Equal("Cloud edit", c.WinnerValue);
+        Assert.Equal("Local edit", c.LoserValue);
         Assert.Equal("https://example.com", c.Url);
 
-        // 冲突是纯观测：决胜结果仍按 LWW
-        Assert.Equal("云端改的", r.State.Items[K].N);
+        // Conflicts are purely observational: the winner still follows LWW
+        Assert.Equal("Cloud edit", r.State.Items[K].N);
     }
 
     public static TheoryData<string, Item, Item, string> ConflictFieldCases()
     {
-        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0);
+        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0);
 
         var data = new TheoryData<string, Item, Item, string>
         {
-            { "标题变了", orig, Fixtures.Bookmark(RootFolders.Toolbar, "新", "https://example.com", 200, 0), "title" },
-            { "URL 变了", orig, Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://other.example", 200, 0), "url" },
-            { "父目录变了", orig, Fixtures.Bookmark(RootFolders.Menu, "标题", "https://example.com", 200, 0), "parent" },
-            // 书签变成文件夹：P 相同、N 相同，只有 T 不同 —— FirstDifferingField
-            // 按 parent→type→title→url 的固定顺序取第一个差异，所以是 "type"
-            { "书签变成文件夹", orig, Fixtures.Folder(RootFolders.Toolbar, "标题", 200, 0), "type" },
-            // P 与 T 同时不同：固定顺序保证一定报 "parent"，不随同步轮次变化
-            { "父目录和类型都变了", orig, Fixtures.Folder(RootFolders.Menu, "标题", 200, 0), "parent" },
+            { "Title changed", orig, Fixtures.Bookmark(RootFolders.Toolbar, "New", "https://example.com", 200, 0), "title" },
+            { "URL changed", orig, Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://other.example", 200, 0), "url" },
+            { "Parent changed", orig, Fixtures.Bookmark(RootFolders.Menu, "Title", "https://example.com", 200, 0), "parent" },
+            // Bookmark-to-folder: same P, same N, only T differs — FirstDifferingField takes
+            // the first difference in fixed parent→type→title→url order, so "type"
+            { "Bookmark became folder", orig, Fixtures.Folder(RootFolders.Toolbar, "Title", 200, 0), "type" },
+            // P and T differ together: the fixed order always reports "parent", stable across rounds
+            { "Parent and type both changed", orig, Fixtures.Folder(RootFolders.Menu, "Title", 200, 0), "parent" },
         };
 
         return data;
@@ -359,14 +359,14 @@ public class MergeTests
 
     [Theory]
     [MemberData(nameof(ConflictFieldCases))]
-    public void 冲突记录正确的字段(string name, Item serverItem, Item clientItem, string wantField)
+    public void ConflictRecordsCorrectField(string name, Item serverItem, Item clientItem, string wantField)
     {
-        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "标题", "https://example.com", 100, 0);
+        Item orig = Fixtures.Bookmark(RootFolders.Toolbar, "Title", "https://example.com", 100, 0);
         var baseMap = new Dictionary<string, string>(StringComparer.Ordinal) { [K] = orig.M };
 
         State s = State.New();
         State i = State.New();
-        // 两侧都"改过"：服务端基线也要晚于 base
+        // Both sides "changed": the server baseline must also be newer than base
         s.Items[K] = serverItem with { M = Hlc.Encode(300, 0) };
         i.Items[K] = clientItem;
 
@@ -377,15 +377,15 @@ public class MergeTests
         _ = name;
     }
 
-    // ── 不变量 ────────────────────────────────────────────────────────
+    // ── Invariants ──────────────────────────────────────────────────────
 
     [Fact]
-    public void 不修改入参()
+    public void DoesNotMutateInputs()
     {
         State server = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "一", "https://one.example", 100, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "One", "https://one.example", 100, 0)));
         State incoming = Fixtures.StateOf(
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "二", "https://one.example", 200, 0)));
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Two", "https://one.example", 200, 0)));
         var baseMap = new Dictionary<string, string>(StringComparer.Ordinal) { [K] = Hlc.Encode(50, 0) };
 
         State serverBefore = server.Clone();
@@ -394,8 +394,8 @@ public class MergeTests
 
         _ = Merger.Merge(server, incoming, baseMap, Fixtures.DeviceB, Fixtures.T0);
 
-        Assert.True(Fixtures.SameStates(server, serverBefore), "Merge 修改了入参 server");
-        Assert.True(Fixtures.SameStates(incoming, incomingBefore), "Merge 修改了入参 incoming");
+        Assert.True(Fixtures.SameStates(server, serverBefore), "Merge mutated input server");
+        Assert.True(Fixtures.SameStates(incoming, incomingBefore), "Merge mutated input incoming");
         Assert.Equal(baseBefore.Count, baseMap.Count);
         foreach ((string k, string v) in baseMap)
         {
@@ -404,16 +404,16 @@ public class MergeTests
     }
 
     /// <summary>
-    /// 服务端有的 item 绝不会凭空消失 —— 删除必须以墓碑的形式显式表达。
-    /// 这是"合并绝不会静默丢书签"这条承诺的直接体现。
+    /// A server-side item never vanishes silently — deletes must be explicit tombstones.
+    /// This is the direct expression of "merge never silently drops bookmarks".
     /// </summary>
     [Fact]
-    public void 绝不丢服务端item()
+    public void NeverDropsServerItems()
     {
         State server = Fixtures.StateOf(
-            ("a", Fixtures.Bookmark(RootFolders.Toolbar, "一", "https://one.example", 100, 0)),
-            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "二", "https://two.example", 100, 0)),
-            ("c", Fixtures.Folder(RootFolders.Unfiled, "目录", 100, 0)));
+            ("a", Fixtures.Bookmark(RootFolders.Toolbar, "One", "https://one.example", 100, 0)),
+            ("b", Fixtures.Bookmark(RootFolders.Toolbar, "Two", "https://two.example", 100, 0)),
+            ("c", Fixtures.Folder(RootFolders.Unfiled, "Folder", 100, 0)));
 
         MergeResult r = Merger.Merge(server, State.New(), null, Fixtures.DeviceB, Fixtures.T0);
 
@@ -424,29 +424,30 @@ public class MergeTests
     }
 
     [Fact]
-    public void 合并结果自洽()
+    public void MergeResultIsSelfConsistent()
     {
         State server = Fixtures.StateOf(
-            ("f", Fixtures.Folder(RootFolders.Toolbar, "目录", 100, 0)),
+            ("f", Fixtures.Folder(RootFolders.Toolbar, "Folder", 100, 0)),
             ("b", Fixtures.Tomb(
-                Fixtures.Bookmark(Fixtures.KeyOf("f"), "一", "https://one.example", 100, 0), Fixtures.T0, 100, 0)));
+                Fixtures.Bookmark(Fixtures.KeyOf("f"), "One", "https://one.example", 100, 0), Fixtures.T0, 100, 0)));
         State incoming = Fixtures.StateOf(
-            ("f", Fixtures.Folder(RootFolders.Toolbar, "目录", 100, 0)),
-            ("b", Fixtures.Bookmark(Fixtures.KeyOf("f"), "一", "https://one.example", 300, 0))); // 复活
+            ("f", Fixtures.Folder(RootFolders.Toolbar, "Folder", 100, 0)),
+            ("b", Fixtures.Bookmark(Fixtures.KeyOf("f"), "One", "https://one.example", 300, 0))); // resurrected
 
         MergeResult r = Merger.Merge(server, incoming, null, Fixtures.DeviceB, Fixtures.T0);
 
         ValidationResult v = r.State.Validate();
-        Assert.True(v.IsValid, $"合并结果未通过自身的 Validate: {v.Error}");
+        Assert.True(v.IsValid, $"merge result failed its own Validate: {v.Error}");
     }
 
-    // ── 随机化性质测试 ────────────────────────────────────────────────
+    // ── Randomized property tests ───────────────────────────────────────
     //
-    // 手写用例只能覆盖"想得到的场景"。真正能抓住边界 bug 的是随机化收敛测试：
-    // 生成随机的操作序列，以任意顺序重放，服务端必须收敛到同一个状态。
+    // Hand-written cases only cover "scenarios we thought of". The randomized convergence test
+    // is what really catches edge bugs: random op sequences replayed in any order must converge
+    // the server to the same state.
 
     [Fact]
-    public void 随机化收敛()
+    public void RandomizedConvergence()
     {
         var rnd = new Random(20260928);
         const int devices = 3;
@@ -468,12 +469,12 @@ public class MergeTests
 
             switch (action)
             {
-                case 0: // 新增或覆盖
+                case 0: // Add or overwrite
                     truth[d].Items[k] = Fixtures.Bookmark(
                         RootFolders.Toolbar, "t" + k[..4], "https://e.example/" + k[..4], clock, rnd.Next(50));
                     break;
 
-                case 1: // 删除（墓碑）
+                case 1: // Delete (tombstone)
                     if (truth[d].Items.TryGetValue(k, out Item prev))
                     {
                         truth[d].Items[k] = Fixtures.Tomb(prev, Fixtures.T0, clock, rnd.Next(50));
@@ -481,7 +482,7 @@ public class MergeTests
 
                     break;
 
-                case 2: // 改标题
+                case 2: // Retitle
                     if (truth[d].Items.TryGetValue(k, out Item prev2))
                     {
                         truth[d].Items[k] = prev2 with
@@ -494,13 +495,13 @@ public class MergeTests
                     break;
 
                 case 3:
-                    // 删除本地副本（模拟设备换了新 profile，上报空状态）：
-                    // 此时设备会上报它缓存里的内容，这里不改动 truth
+                    // Drop the local copy (device switched to a fresh profile and reports empty state):
+                    // the device would report its cached content; leave truth untouched here
                     break;
             }
         }
 
-        // 把三台设备的副本以各种顺序合并到服务端
+        // Merge the three device copies into the server in various orders
         State server = State.New();
         int[] order = [0, 1, 2];
         Shuffle(rnd, order);
@@ -509,7 +510,7 @@ public class MergeTests
             server = Merger.Merge(server, truth[d], null, "dev", Fixtures.T0).State;
         }
 
-        // 再以另一个顺序合并一遍，结果必须不变（收敛）
+        // Merge again in another order; the result must not change (convergence)
         State again = State.New();
         foreach (int d in new[] { 2, 0, 1 })
         {
@@ -518,12 +519,12 @@ public class MergeTests
 
         Assert.True(
             Fixtures.SameStates(server, again),
-            $"不同合并顺序得到不同结果，收敛性被破坏：\n A: {Describe(server)}\n B: {Describe(again)}");
+            $"different merge orders diverged, convergence broken:\n A: {Describe(server)}\n B: {Describe(again)}");
 
         ValidationResult v = server.Validate();
-        Assert.True(v.IsValid, $"随机化合并结果未通过 Validate: {v.Error}");
+        Assert.True(v.IsValid, $"randomized merge result failed Validate: {v.Error}");
 
-        // 关键：服务端的结果必须包含每台设备上报过的**所有** key
+        // Key point: the server result must contain **every** key any device reported
         var allKeys = new HashSet<string>(StringComparer.Ordinal);
         foreach (State t in truth)
         {

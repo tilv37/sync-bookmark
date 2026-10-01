@@ -1,31 +1,36 @@
 #!/bin/sh
-# 端到端冒烟测试：用纯 HTTP 驱动真实服务端。
+# End-to-end smoke test: drive the real server over plain HTTP.
 #
-# 与 go test 的分工：go test 走 httptest 内存服务器，验证逻辑；
-# 这个脚本走真实 socket + 真实落盘，验证「JSON 编解码 + 鉴权 + 限流 +
-# 原子写 + 快照」这条链路 —— httptest 不会暴露序列化层的 bug。
+# Division of labor with dotnet test: dotnet test uses an in-memory Kestrel
+# fixture to verify logic; this script uses a real socket + real disk writes
+# to verify the "JSON codec + auth + rate limiting + atomic write +
+# snapshot" chain — the in-memory fixture cannot expose serialization bugs.
 #
-# 用法：
-#   ./smoke.sh                                       # 自动起服务、跑完清理
-#   HOST=example.com TOKEN=xxx ./smoke.sh --remote   # 打远程（会改真实数据）
+# Usage:
+#   ./smoke.sh                                       # start a server automatically, clean up afterwards
+#   HOST=example.com TOKEN=xxx ./smoke.sh --remote   # hit a remote (mutates real data)
 #
-# 依赖：curl。读 JSON 三级降级：python3 → jq → 项目自带的 test/jsonq。
+# Requires: curl. JSON reads degrade in three levels: python3 -> jq -> the
+# bundled test/jsonq helper.
 #
-# ── 为什么 payload 一律用文件 ──────────────────────────────────────────
+# ── Why payloads always go through files ───────────────────────────────
 #
-# 早期版本把 JSON 直接写在命令行里：api POST /sync "{\"device\":...$(bm ...)}"。
-# 双重引号里嵌命令替换再嵌函数调用，出错时的报错信息完全指不到真正的
-# 位置（"syntax error near unexpected token `)'"，而实际是少了一个反斜杠）。
-# 现在统一用 heredoc 写临时文件、curl --data-binary @file 发送 ——
-# 引号层级从三层降到零，JSON 可以按 JSON 的样子读。
+# Early versions inlined JSON on the command line:
+#   api POST /sync "{\"device\":...$(bm ...)}".
+# Double quotes nesting command substitution nesting function calls meant the
+# error message never pointed at the real spot
+# ("syntax error near unexpected token `)'" for a missing backslash).
+# Now everything is written to temp files via heredoc and sent with
+# curl --data-binary @file — zero quoting levels, JSON reads as JSON.
 
 set -eu
 
-# ── 路径解析 ──────────────────────────────────────────────────────────
+# ── Path resolution ───────────────────────────────────────────────────
 #
-# 必须基于**脚本自身所在目录**解析，而不是当前工作目录。否则
-# `bash test/smoke.sh`（从仓库根跑）和 `cd test && bash smoke.sh` 会指向
-# 不同的二进制文件 —— 那种 bug 极难察觉，因为换个目录就好了。
+# Resolve from **the script's own directory**, never from the cwd. Otherwise
+# `bash test/smoke.sh` (from the repo root) and `cd test && bash smoke.sh`
+# point at different binaries — a bug that is hard to notice because changing
+# directories "fixes" it.
 script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd -P)
 [ -n "$script_dir" ] || script_dir=$(pwd -P)
 
@@ -38,17 +43,20 @@ DATA_DIR=""
 WORK=""
 
 cleanup() {
-    # 只在本脚本真的拉起过服务时才杀 —— 上面那个 preflight 失败后 KILL_PID 是空的，
-    # 而 taskkill 按**映像名**杀，会把用户自己正在跑的服务也杀掉。
+    # Only kill what this script actually started: after a failed preflight
+    # KILL_PID is empty, and taskkill by **image name** would kill a server
+    # the user is running themselves.
     if [ -n "$KILL_PID" ]; then
-        # Git Bash 里的 `kill` 杀不掉原生 Windows 进程：$! 拿到的是 MSYS 的
-        # 内部 PID，和 bmsync.exe 真正的 Windows PID 对不上。
-        # 结果是脚本"跑完了"、服务却还在后台占着端口 —— 下一次跑就
-        # "address already in use"，然后一连串 500 把人带偏到完全错误的方向。
-        # 之所以难查，是因为上一轮明明全绿。
+        # `kill` in Git Bash cannot kill native Windows processes: $! is
+        # MSYS's internal PID, not the real Windows PID of bmsync.exe.
+        # The result is a script that "finished" while the server still holds
+        # the port — the next run fails with "address already in use" and a
+        # streak of 500s pointing in a completely wrong direction.
+        # Hard to track down because the previous round was all green.
         #
-        # 按映像名杀（//IM 而不是 //PID）正是因为 PID 不可用。
-        # 本脚本一次只起一个 bmsync，且 KILL_PID 非空才执行，所以不会误伤。
+        # Killing by image name (//IM instead of //PID) works around the
+        # unusable PID. This script starts at most one bmsync and only kills
+        # when KILL_PID is non-empty, so nothing else is harmed.
         if command -v taskkill.exe >/dev/null 2>&1; then
             taskkill.exe //F //IM "$(basename "$BIN")" >/dev/null 2>&1 || true
         else
@@ -70,9 +78,10 @@ section() { printf '\n\033[1m%s\033[0m\n' "$1"; }
 
 WORK=$(mktemp -d)
 
-# ── JSON 后端 ─────────────────────────────────────────────────────────
-# 表达式的语法三种后端各不相同，所以不写通用表达式函数，而是把每个查询
-# 写成具名函数在内部按后端分派。断言处因此保持可读。
+# ── JSON backend ──────────────────────────────────────────────────────
+# Each backend has its own expression syntax, so instead of a generic
+# expression function every query is a named function dispatching per
+# backend inside. Assertions stay readable.
 MODE=""
 JQ_BIN=""
 
@@ -84,24 +93,26 @@ setup_json() {
     else
         JQ_BIN="${JSONQ:-$script_dir/jsonq/jsonq}"
         if command -v go >/dev/null 2>&1; then
-            # 总是重建，不只在文件缺失时。
-            # 之前只在 `[ ! -x ]` 时编译，于是改了 main.go 之后脚本仍在用
-            # 旧二进制 —— 表现为"新加的函数名报 路径必须以 d 开头"，
-            # 而错误信息完全指不到"二进制是旧的"这件事。
+            # Always rebuild, not only when the file is missing.
+            # Previously it compiled only on `[ ! -x ]`, so edits to main.go
+            # kept running against the stale binary — new function names then
+            # failed with "path must start with d" while nothing pointed at
+            # "the binary is old".
             #
-            # 编到源目录（而不是临时目录）是有意的：jsonq/ 已经是一个
-            # 独立的 go module，把它当"仓库内的小工具"更符合直觉，
-            # 且 .gitignore 里只有一条。
-            (cd "$script_dir/jsonq" && dotnet publish -o jsonq .) >/dev/null 2>&1 || true
+            # Building into the source dir (not a temp dir) is deliberate:
+            # jsonq/ is already a standalone go module, treating it as "a
+            # small in-repo tool" reads more naturally, and .gitignore holds
+            # a single line for it.
+            (cd "$script_dir/jsonq" && go build -o jsonq .) >/dev/null 2>&1 || true
         fi
         if [ -x "$JQ_BIN" ]; then
             MODE=bin
         else
-            echo "无法读取 JSON：需要 python3、jq，或可用的 go 来编译 test/jsonq" >&2
+            echo "Cannot read JSON: need python3, jq, or a working go to build test/jsonq" >&2
             exit 1
         fi
     fi
-    printf 'JSON 后端: %s\n' "$MODE"
+    printf 'JSON backend: %s\n' "$MODE"
 }
 
 py() {
@@ -110,9 +121,9 @@ d=json.load(sys.stdin)
 print($2)" 2>/dev/null || echo ""
 }
 
-# ── 具名查询 ─────────────────────────────────────────────────────────
+# ── Named queries ─────────────────────────────────────────────────────
 
-# 响应体里 state 的 item 总数
+# Total items in the response state
 q_items() {
     case "$MODE" in
         py)  py "$1" "len(d['state']['items'])" ;;
@@ -121,7 +132,7 @@ q_items() {
     esac
 }
 
-# 响应体里 summary.<field>
+# summary.<field> of the response
 q_summary() {
     case "$MODE" in
         py)  py "$1" "d['summary']['$2']" ;;
@@ -130,7 +141,7 @@ q_summary() {
     esac
 }
 
-# 响应体里 state.<field>
+# state.<field> of the response
 q_state() {
     case "$MODE" in
         py)  py "$1" "d['state'].get('$2','')" ;;
@@ -139,7 +150,7 @@ q_state() {
     esac
 }
 
-# 响应体里 state 里的墓碑数（d == true）
+# Tombstone count in the response state (d == true)
 q_tombstones() {
     case "$MODE" in
         py)  py "$1" "sum(1 for v in d['state']['items'].values() if v.get('d'))" ;;
@@ -148,13 +159,13 @@ q_tombstones() {
     esac
 }
 
-# 响应体里 state 里的活跃项数
+# Active item count in the response state
 q_active() {
     case "$MODE" in
         py)  py "$1" "sum(1 for v in d['state']['items'].values() if not v.get('d'))" ;;
         jq)  printf '%s' "$1" | jq -r '[.state.items[] | select(.d != true)] | length' 2>/dev/null || echo "" ;;
         bin)
-            # jsonq 只提供"为真计数"，没有"为假计数"，所以用总数减墓碑数。
+            # jsonq only offers "count-if-true", no "count-if-false", so subtract.
             _t=$(printf '%s' "$1" | "$JQ_BIN" 'len(d["state"]["items"])' 2>/dev/null || echo "")
             _d=$(printf '%s' "$1" | "$JQ_BIN" 'count(d["state"]["items"], "d")' 2>/dev/null || echo "")
             if [ -n "$_t" ] && [ -n "$_d" ]; then echo $((_t - _d)); else echo ""; fi
@@ -162,7 +173,7 @@ q_active() {
     esac
 }
 
-# 响应体里 conflicts 的条数
+# Conflict count in the response
 q_conflicts() {
     case "$MODE" in
         py)  py "$1" "len(d['conflicts'])" ;;
@@ -171,10 +182,11 @@ q_conflicts() {
     esac
 }
 
-# 冲突条目的某个字段（取数组里最后一个元素的该字段）
+# One field of a conflict entry (that field of the last array element)
 #
-# 注意 jsonq 后端用的是 last(...) 而不是 get(...)：conflicts 是**数组**，
-# get 对数组会安静地返回空串，那会变成"功能没实现"式的假象。
+# Note the jsonq backend uses last(...) rather than get(...): conflicts is an
+# **array**, and get on an array quietly returns an empty string — the
+# "feature missing" kind of false image.
 q_conflict_field() {
     case "$MODE" in
         py)  py "$1" "d['conflicts'][-1]['$2'] if d['conflicts'] else ''" ;;
@@ -183,7 +195,7 @@ q_conflict_field() {
     esac
 }
 
-# 响应体里 snapshots 的条数
+# Snapshot count in the response
 q_snapshots() {
     case "$MODE" in
         py)  py "$1" "len(d['snapshots'])" ;;
@@ -192,8 +204,8 @@ q_snapshots() {
     esac
 }
 
-# 落盘 state.json 的 item 数。
-# 落盘文件顶层就有 items；HTTP 响应体才包一层 state。两种都试。
+# Item count of the on-disk state.json.
+# The file has items at the top level; HTTP bodies wrap it in state. Try both.
 q_file_items() {
     case "$MODE" in
         py)  py "$(cat "$1")" "len(d.get('items', d.get('state',{}).get('items',{})))" ;;
@@ -208,7 +220,7 @@ q_file_items() {
     esac
 }
 
-# ── 时间与 HLC ───────────────────────────────────────────────────────
+# ── Time and HLC ────────────────────────────────────────────────────
 
 now_ms() {
     if [ "$MODE" = py ]; then
@@ -220,9 +232,9 @@ now_ms() {
 
 hlc() { printf '%013d-%05d' "$1" "${2:-0}"; }
 
-# ── payload 构造 ──────────────────────────────────────────────────────
-# 全部写进文件，curl 用 --data-binary @file 发送。JSON 长什么样就怎么写，
-# 不做命令行转义。
+# ── Payload construction ────────────────────────────────────────────
+# Everything goes into files, sent with curl --data-binary @file. JSON is
+# written as JSON looks, with no command-line escaping.
 
 R_TOOLBAR="toolbar_____"
 K1=11111111111111111111111111111111
@@ -231,13 +243,13 @@ K3=33333333333333333333333333333333
 K4=44444444444444444444444444444444
 K5=55555555555555555555555555555555
 
-# bm <key> <标题> <url> <毫秒> <计数> [额外JSON片段] —— 输出一条 item
+# bm <key> <title> <url> <millis> <counter> [extra JSON fragment] — emits one item
 bm() {
     printf '"%s":{"p":"%s","t":"b","n":"%s","u":"%s","a":"%s","m":"%s"%s}' \
         "$1" "$R_TOOLBAR" "$2" "$3" "$(hlc "$4" 0)" "$(hlc "$4" "$5")" "${6:-}"
 }
 
-# build_sync <输出文件> <设备名> <items-json> [base-json]
+# build_sync <output file> <device name> <items-json> [base-json]
 build_sync() {
     {
         printf '{"device":"%s","state":{"v":1,"items":{%s}},"base":{%s}}' \
@@ -245,16 +257,17 @@ build_sync() {
     } > "$1"
 }
 
-# ── HTTP ─────────────────────────────────────────────────────────────
-# 状态码写入 $CODE，响应正文写入 $BODY。
+# ── HTTP ────────────────────────────────────────────────────────────
+# Status code goes to $CODE, body to $BODY.
 #
-# ⚠️ 刻意**不 echo 状态码**。早期是 `c=$(api ...)`，那样 api 在子 shell
-# 里执行，函数内设置的 BODY 随子 shell 一起消失，所有 JSON 查询拿到空串，
-# 断言全变成假失败。必须靠全局变量回传。
+# WARNING: deliberately **no echo of the status**. Early versions used
+# `c=$(api ...)`; then api ran in a subshell, its BODY died with the
+# subshell, every JSON query got an empty string, and all assertions failed
+# spuriously. Globals are the return channel.
 CODE=""
 BODY=""
 
-api_file() {  # api_file <method> <path> <payload文件|-> 
+api_file() {  # api_file <method> <path> <payload file|->
     _m="$1"; _p="$2"; _f="$3"
     _out=$(mktemp)
     if [ "$_f" = "-" ]; then
@@ -269,7 +282,7 @@ api_file() {  # api_file <method> <path> <payload文件|->
     BODY=$(cat "$_out"); rm -f "$_out"
 }
 
-api_noauth_file() {  # 不带 Authorization
+api_noauth_file() {  # without Authorization
     _m="$1"; _p="$2"; _f="$3"
     _out=$(mktemp)
     CODE=$(curl -sS -o "$_out" -w '%{http_code}' -X "$_m" "$API$_p" \
@@ -278,35 +291,35 @@ api_noauth_file() {  # 不带 Authorization
     BODY=$(cat "$_out"); rm -f "$_out"
 }
 
-# ── 启动本地服务 ─────────────────────────────────────────────────────
+# ── Start a local server ────────────────────────────────────────────
 setup_json
 
 if [ "${1:-}" != "--remote" ]; then
-    # Windows 上产物带 .exe 后缀，且 Git Bash 的 [ -x ] 对它不生效 ——
-    # 少这一段判断的话，脚本在 Windows 上会以"找不到可执行的 bmsync"退出，
-    # 而那个文件其实就在那儿，只是名字不同。
+    # On Windows the artifact has an .exe suffix, and Git Bash `[ -x ]` does
+    # not match it — without this branch the script exits with "bmsync not
+    # executable" on Windows while the file sits right there under another name.
     if [ ! -f "$BIN" ] && [ ! -f "$BIN.exe" ]; then
-        echo "找不到可执行的 $BIN，先跑：" >&2
+        echo "Cannot find an executable $BIN; publish first:" >&2
         echo "  cd bmsync && dotnet publish src/BookmarkSync.Cli -c Release -o out" >&2
         exit 1
     fi
     case "$BIN" in *.exe) ;; *) [ -f "$BIN.exe" ] && BIN="$BIN.exe" ;; esac
 
-    # HOST 可能是 ":18099" 这种形式 —— 补成具体主机名，否则 Kestrel 不认，
-    # 而 curl 去连 ":18099" 的症状是"服务起来了但 health 一直不通"。
-    # 必须放在端口预检**之前**：预检用的也是这个 URL。
+    # HOST may be the ":18099" form — fill in a concrete host, or Kestrel
+    # rejects it while curl to ":18099" reports "up but health never answers".
+    # This must run **before** the port preflight: the preflight uses this URL.
     case "$HOST" in
         :*) HOST="127.0.0.1$HOST" ;;
     esac
 
-    # 端口预检：先确认没人占着，再起服务。
+    # Port preflight: confirm nobody listens before starting.
     #
-    # 少了这一步，上一次跑崩了留下的后台进程会让这一次直接撞上
-    # "address already in use"，然后**全部 28 项断言都变成 500 失败** ——
-    # 满屏红色，却没有一条提到真正的原因（端口冲突）。
-    # 提前检查并明确报错，比让人从 28 个失败里猜要省事得多。
+    # Without it, a crashed earlier run's leftover process hits this run with
+    # "address already in use", and then **all 28 assertions fail with 500** —
+    # a wall of red with not one line naming the real cause (port conflict).
+    # Failing early and loudly beats guessing from 28 failures.
     if curl -sf -o /dev/null "http://$HOST/api/health" 2>/dev/null; then
-        echo "端口 $HOST 上已有服务在跑。先停掉它，或换端口：" >&2
+        echo "A server is already running on port $HOST. Stop it first, or pick another port:" >&2
         echo "  HOST=127.0.0.1:18098 $0" >&2
         exit 1
     fi
@@ -317,34 +330,34 @@ if [ "${1:-}" != "--remote" ]; then
         "$BIN" >"$DATA_DIR/server.log" 2>&1 &
     KILL_PID=$!
 
-    # 等 10 秒（不是 5 秒）：Release 下 JIT + 源生成 JSON 的首次反序列化
-    # 比 Debug 慢，5 秒在慢机器上会偶发超时 —— 而超时的症状是"服务没起来"，
-    # 与真实的启动失败完全无法区分。
+    # Wait 10 seconds (not 5): Release JIT + source-generated JSON first
+    # deserialization is slower than Debug, and 5s flakes on slow machines —
+    # with a timeout indistinguishable from a real startup failure.
     for _ in $(seq 1 20); do
         curl -sf -o /dev/null "http://$HOST/api/health" 2>/dev/null && break
         sleep 0.5
     done
     if ! curl -sf -o /dev/null "http://$HOST/api/health" 2>/dev/null; then
-        echo "服务端没起来，日志：" >&2; cat "$DATA_DIR/server.log" >&2; exit 1
+        echo "Server did not start, log:" >&2; cat "$DATA_DIR/server.log" >&2; exit 1
     fi
 fi
 
-[ -n "$TOKEN" ] || { echo "需要 TOKEN 环境变量" >&2; exit 1; }
+[ -n "$TOKEN" ] || { echo "TOKEN environment variable is required" >&2; exit 1; }
 
 EMPTY="$WORK/empty.json"
 cat > "$EMPTY" <<'JSON'
 {"device":"pc-work","state":{"v":1,"items":{}},"base":{}}
 JSON
 
-# ── 场景 ─────────────────────────────────────────────────────────────
+# ── Scenarios ───────────────────────────────────────────────────────
 
-section "0. 连通性与鉴权"
+section "0. Connectivity and auth"
 api_file GET /health -
-[ "$CODE" = 200 ] && ok "health 返回 200" || bad "health 返回 $CODE" "$BODY"
+[ "$CODE" = 200 ] && ok "health returns 200" || bad "health returned $CODE" "$BODY"
 
 api_noauth_file GET /health "$EMPTY"
-[ "$CODE" = 200 ] && ok "health 无需 token（options 页「测试连接」依赖这一点）" \
-    || bad "health 竟需要鉴权，$CODE"
+[ "$CODE" = 200 ] && ok "health needs no token (the options-page Test connection relies on this)" \
+    || bad "health unexpectedly requires auth, $CODE"
 
 _bad=$(mktemp)
 printf '{"device":"x","state":{"v":1,"items":{}},"base":{}}' > "$_bad"
@@ -353,18 +366,18 @@ CODE=$(curl -sS -o "$_out" -w '%{http_code}' -X POST "$API/sync" \
     -H "Authorization: Bearer wrongwrongwrongwrongwrongwrongwrongwrong" \
     -H 'Content-Type: application/json' --data-binary "@$_bad" 2>/dev/null) || CODE=000
 rm -f "$_bad" "$_out"
-[ "$CODE" = 401 ] && ok "错误 token 被拒（401）" || bad "错误 token 应 401，实际 $CODE"
+[ "$CODE" = 401 ] && ok "wrong token rejected (401)" || bad "wrong token should be 401, got $CODE"
 
-section "1. 设备 A 上传 5 个书签"
+section "1. Device A uploads 5 bookmarks"
 NOW=$(now_ms)
 ITEMS=""
-for n in 一 二 三 四 五; do
+for n in One Two Three Four Five; do
     case "$n" in
-        一) kk=$K1; u=https://one.example ;;
-        二) kk=$K2; u=https://two.example ;;
-        三) kk=$K3; u=https://three.example ;;
-        四) kk=$K4; u=https://four.example ;;
-        五) kk=$K5; u=https://five.example ;;
+        One) kk=$K1; u=https://one.example ;;
+        Two) kk=$K2; u=https://two.example ;;
+        Three) kk=$K3; u=https://three.example ;;
+        Four) kk=$K4; u=https://four.example ;;
+        Five) kk=$K5; u=https://five.example ;;
     esac
     ITEMS="$ITEMS$(bm "$kk" "$n" "$u" "$NOW" 1),"
 done
@@ -372,37 +385,37 @@ ITEMS=${ITEMS%,}
 P="$WORK/up5.json"
 build_sync "$P" pc-personal "$ITEMS"
 api_file POST /sync "$P"
-[ "$CODE" = 200 ] && ok "上传成功" || bad "上传失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] && ok "upload succeeded" || bad "upload failed $CODE" "$BODY"
 n=$(q_items "$BODY")
-[ "$n" = 5 ] && ok "服务端存下 5 项" || bad "期望 5 项，实际 '$n'"
+[ "$n" = 5 ] && ok "server stored 5 items" || bad "expected 5 items, got '$n'"
 cr=$(q_summary "$BODY" created)
-[ "$cr" = 5 ] && ok "summary.created = 5" || bad "created 期望 5，实际 '$cr'"
+[ "$cr" = 5 ] && ok "summary.created = 5" || bad "created expected 5, got '$cr'"
 h=$(q_state "$BODY" hlc)
-[ -n "$h" ] && ok "响应带 hlc（客户端据此校时）" || bad "响应缺少 hlc"
+[ -n "$h" ] && ok "response carries hlc (clients calibrate from it)" || bad "response missing hlc"
 
-section "2. 设备 B 本地空白，应收到全部 5 项"
+section "2. Blank device B should receive all 5"
 api_file POST /sync "$EMPTY"
-[ "$CODE" = 200 ] && ok "同步成功" || bad "同步失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] && ok "sync succeeded" || bad "sync failed $CODE" "$BODY"
 n=$(q_items "$BODY")
-[ "$n" = 5 ] && ok "工作电脑收到 5 项" || bad "期望 5 项，实际 '$n'"
+[ "$n" = 5 ] && ok "work PC received 5 items" || bad "expected 5 items, got '$n'"
 
-section "3. B 删除 2 项后上报，A 拉取应看到删除传播"
+section "3. B deletes 2 items and uploads; A pulls and should see the deletes"
 NOW=$(now_ms)
 DEL=",\"d\":true,\"x\":$NOW"
-ITEMS="$(bm "$K1" 一 https://one.example "$NOW" 1),$(bm "$K2" 二 https://two.example "$NOW" 2 "$DEL"),$(bm "$K3" 三 https://three.example "$NOW" 3 "$DEL")"
+ITEMS="$(bm "$K1" One https://one.example "$NOW" 1),$(bm "$K2" Two https://two.example "$NOW" 2 "$DEL"),$(bm "$K3" Three https://three.example "$NOW" 3 "$DEL")"
 P="$WORK/del2.json"
 build_sync "$P" pc-work "$ITEMS"
 api_file POST /sync "$P"
-[ "$CODE" = 200 ] && ok "删除上报成功" || bad "删除上报失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] && ok "delete upload succeeded" || bad "delete upload failed $CODE" "$BODY"
 
 api_file POST /sync "$EMPTY"
-[ "$CODE" = 200 ] || bad "A 拉取失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] || bad "A pull failed $CODE" "$BODY"
 t=$(q_tombstones "$BODY")
-[ "$t" = 2 ] && ok "A 端看到 2 个墓碑（删除已传播）" || bad "期望 2 墓碑，实际 '$t'"
+[ "$t" = 2 ] && ok "A sees 2 tombstones (deletes propagated)" || bad "expected 2 tombstones, got '$t'"
 a=$(q_active "$BODY")
-[ "$a" = 3 ] && ok "剩余 3 个活跃书签" || bad "期望 3 活跃，实际 '$a'"
+[ "$a" = 3 ] && ok "3 active bookmarks remain" || bad "expected 3 active, got '$a'"
 
-section "4. 幂等性：同一请求连发 3 次"
+section "4. Idempotency: same request 3 times in a row"
 prev=""
 drift=no
 i=1
@@ -410,43 +423,43 @@ while [ "$i" -le 3 ]; do
     api_file POST /sync "$P"
     n=$(q_items "$BODY")
     if [ -n "$prev" ] && [ "$n" != "$prev" ]; then
-        bad "第 $i 次结果漂移：$prev → $n"; drift=yes; break
+        bad "attempt $i drifted: $prev -> $n"; drift=yes; break
     fi
     prev="$n"
     i=$((i + 1))
 done
-[ "$drift" = no ] && ok "重复同步结果稳定（$prev 项）"
+[ "$drift" = no ] && ok "repeated syncs are stable ($prev items)"
 
-section "5. 并发编辑 → 冲突日志"
+section "5. Concurrent edits -> conflict log"
 NOW=$(now_ms)
 BM_BASE=$(hlc 1000 1)
 BASEMAP="\"$K1\":\"$BM_BASE\""
 
 P="$WORK/srv-edit.json"
-build_sync "$P" pc-personal "$(bm "$K1" 云端改的 https://one.example "$NOW" 0)" "$BASEMAP"
+build_sync "$P" pc-personal "$(bm "$K1" ServerEdit https://one.example "$NOW" 0)" "$BASEMAP"
 api_file POST /sync "$P"
-[ "$CODE" = 200 ] || bad "服务端侧改动上报失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] || bad "server-side edit upload failed $CODE" "$BODY"
 
 P2="$WORK/cli-edit.json"
-build_sync "$P2" pc-work "$(bm "$K1" 本地改的 https://one.example "$((NOW + 1))" 0)" "$BASEMAP"
+build_sync "$P2" pc-work "$(bm "$K1" ClientEdit https://one.example "$((NOW + 1))" 0)" "$BASEMAP"
 api_file POST /sync "$P2"
-[ "$CODE" = 200 ] || bad "客户端侧改动上报失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] || bad "client-side edit upload failed $CODE" "$BODY"
 
 api_file GET '/conflicts?limit=10' -
-[ "$CODE" = 200 ] || bad "读取冲突失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] || bad "conflict read failed $CODE" "$BODY"
 n=$(q_conflicts "$BODY")
 case "$n" in
-    ''|0) bad "期望至少 1 条冲突，实际 '$n'" ;;
-    *)    ok "记录到 $n 条冲突" ;;
+    ''|0) bad "expected at least 1 conflict, got '$n'" ;;
+    *)    ok "logged $n conflicts" ;;
 esac
 r=$(q_conflict_field "$BODY" reason)
-[ "$r" = concurrent_edit ] && ok "类型为 concurrent_edit" || bad "类型错误：'$r'"
+[ "$r" = concurrent_edit ] && ok "type is concurrent_edit" || bad "wrong type: '$r'"
 f=$(q_conflict_field "$BODY" field)
-[ "$f" = title ] && ok "冲突字段定位到 title" || bad "字段定位错误：'$f'"
+[ "$f" = title ] && ok "conflict pinned to title" || bad "wrong field: '$f'"
 
-section "6. 限额与畸形输入"
+section "6. Limits and malformed input"
 
-post_raw() {  # post_raw <原始JSON> —— 直接发字面量，测解析层
+post_raw() {  # post_raw <raw JSON> — send a literal, exercising the parse layer
     _f=$(mktemp)
     printf '%s' "$1" > "$_f"
     api_file POST /sync "$_f"
@@ -454,32 +467,32 @@ post_raw() {  # post_raw <原始JSON> —— 直接发字面量，测解析层
 }
 
 post_raw '{"device":"x","state":{"v":99,"items":{}},"base":{}}'
-[ "$CODE" = 400 ] && ok "schema 版本不符 → 400" || bad "期望 400，实际 $CODE"
+[ "$CODE" = 400 ] && ok "schema version mismatch -> 400" || bad "expected 400, got $CODE"
 
 post_raw '{"device":"x","state":{"v":1,"items":{"short":{"p":"toolbar_____","t":"b","n":"x","u":"https://x.example","m":"0000000001000-00000"}}},"base":{}}'
-[ "$CODE" = 400 ] && ok "非法 key → 400" || bad "期望 400，实际 $CODE"
+[ "$CODE" = 400 ] && ok "illegal key -> 400" || bad "expected 400, got $CODE"
 
 post_raw '{"not":"valid json'
-[ "$CODE" = 400 ] && ok "畸形 JSON → 400" || bad "期望 400，实际 $CODE"
+[ "$CODE" = 400 ] && ok "malformed JSON -> 400" || bad "expected 400, got $CODE"
 
 post_raw '{"device":"x","state":{"v":1,"items":{}},"base":{},"typo":1}'
-[ "$CODE" = 400 ] && ok "未知字段 → 400（客户端拼错能立刻发现）" || bad "期望 400，实际 $CODE"
+[ "$CODE" = 400 ] && ok "unknown field -> 400 (client typos surface immediately)" || bad "expected 400, got $CODE"
 
 api_file POST /sync "$EMPTY"
-[ "$CODE" = 200 ] && ok "合法空 state → 200" || bad "期望 200，实际 $CODE"
+[ "$CODE" = 200 ] && ok "valid empty state -> 200" || bad "expected 200, got $CODE"
 
-section "7. 历史快照（回滚点）"
+section "7. History snapshots (restore points)"
 api_file GET /history -
-[ "$CODE" = 200 ] && ok "history 可读" || bad "history 失败 $CODE" "$BODY"
+[ "$CODE" = 200 ] && ok "history readable" || bad "history failed $CODE" "$BODY"
 n=$(q_snapshots "$BODY")
 case "$n" in
-    ''|0) bad "期望至少 1 个快照，实际 '$n'" ;;
-    *)    ok "产生 $n 个快照" ;;
+    ''|0) bad "expected at least 1 snapshot, got '$n'" ;;
+    *)    ok "produced $n snapshots" ;;
 esac
 
-section "8. 限流"
-# 上限是 60/min —— 见 limits.go 里为什么手动触发的工具不能用 10/min。
-# 打满 60 次太慢，这里只验证"正常用量不被限流"。
+section "8. Rate limiting"
+# The cap is 60/min — see why a manually triggered tool cannot use 10/min.
+# Firing 60 times is too slow; just verify normal usage is not throttled.
 flooded=no
 i=1
 while [ "$i" -le 3 ]; do
@@ -487,22 +500,22 @@ while [ "$i" -le 3 ]; do
     [ "$CODE" = 429 ] && { flooded=yes; break; }
     i=$((i + 1))
 done
-[ "$flooded" = no ] && ok "正常用量不被限流（上限刻意放宽到 60/min）" \
-    || bad "仅 3 次请求就被限流 —— 上限对手动触发场景过紧"
+[ "$flooded" = no ] && ok "normal usage is not throttled (cap deliberately at 60/min)" \
+    || bad "throttled after only 3 requests — cap too tight for manual triggers"
 
-section "9. 落盘与文件完整性"
+section "9. On-disk state and file integrity"
 if [ -n "$DATA_DIR" ]; then
-    [ -f "$DATA_DIR/state.json" ] && ok "state.json 已落盘" || bad "state.json 不存在"
-    [ -d "$DATA_DIR/history" ]   && ok "history 目录已建"   || bad "history 目录不存在"
-    [ -f "$DATA_DIR/state.json.tmp" ] && bad "临时文件残留（原子写未完成）" \
-        || ok "无临时文件残留（rename 已完成）"
+    [ -f "$DATA_DIR/state.json" ] && ok "state.json written to disk" || bad "state.json missing"
+    [ -d "$DATA_DIR/history" ]   && ok "history dir created"   || bad "history dir missing"
+    [ -f "$DATA_DIR/state.json.tmp" ] && bad "temp file left behind (atomic write incomplete)" \
+        || ok "no temp file left (rename completed)"
     if [ -f "$DATA_DIR/state.json" ]; then
         n=$(q_file_items "$DATA_DIR/state.json")
-        [ -n "$n" ] && ok "落盘文件可解析（$n 项）" || bad "落盘文件无法解析 —— 原子写被破坏"
+        [ -n "$n" ] && ok "on-disk file parses ($n items)" || bad "on-disk file unparsable — atomic write broken"
     fi
 else
-    ok "（远程模式，跳过落盘检查）"
+    ok "(remote mode, skipping on-disk checks)"
 fi
 
-printf '\n\033[1m结果: %d 通过, %d 失败\033[0m\n' "$pass" "$fail"
+printf '\n\033[1mResult: %d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

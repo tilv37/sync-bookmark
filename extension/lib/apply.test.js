@@ -1,12 +1,15 @@
-// extension/lib/apply.test.js —— 应用：同步 state → Firefox 书签树
+// extension/lib/apply.test.js — apply: sync state -> Firefox bookmark tree
 //
-// 这是整个流程里唯一会**真正改动用户数据**的环节。写错了的后果：
+// The only step in the pipeline that **really mutates user data**. Getting it
+// wrong means:
 //
-//   · 该删的没删 → 用户在公司电脑删掉的东西在这边复活
-//   · 先建后删   → 本地已存在的项被判成"已存在"而跳过，删除传播不过来
-//   · 父目录没建 → create 因 parentId 无效而失败，整棵子树丢失
+//   · missed deletes → things deleted on the work PC resurrect here
+//   · create-before-delete → locally present items look "already there" and
+//     deletions never propagate
+//   · missing parent → create fails on an invalid parentId, losing a subtree
 //
-// 所以这里的重点不是"能不能改树"，而是**三条顺序约束**（见 apply.js 头注释）。
+// So the point is not "can it edit the tree" but the **three ordering
+// constraints** (see the apply.js header).
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -20,12 +23,12 @@ import { MockBookmarks } from './mock-bookmarks.js';
 let clockMs = 1_700_000_000_000;
 const clock = new HLC(() => clockMs);
 
-/** 扫一棵 mock 树，返回 scan 的结果（apply 需要 ffId 映射）。 */
+/** Scan a mock tree, returning the scan result (apply needs the Firefox id map). */
 async function live(bm) {
   return scan(bm, { enabledRoots: new Set([ROOT_TOOLBAR, ROOT_MENU, ROOT_UNFILED]) });
 }
 
-/** 构造一条 item */
+/** Build one item */
 function item(type, parentKey, title, url, ms = 1000, extra = {}) {
   const base = { p: parentKey, t: type, n: title, a: encode(ms, 0), m: encode(ms, 1) };
   return type === TYPE_BOOKMARK ? { ...base, u: url } : { ...base, ...extra };
@@ -35,40 +38,40 @@ function stateOf(items) {
   return { v: SCHEMA_VERSION, items: Object.fromEntries(Object.entries(items)) };
 }
 
-/** 跑完整的「规划 + 执行」。 */
+/** Run the full "plan + execute". */
 async function apply(bm, incomingState) {
-  const s = await live(bm);
-  const plan = planApply(s.nodes, incomingState, s.ffKeyToId);
+  const scanned = await live(bm);
+  const plan = planApply(scanned.nodes, incomingState, scanned.firefoxIdBySyncKey);
   const result = await executePlan(bm, plan);
   return { plan, result, after: await live(bm) };
 }
 
-// deriveKey 是**异步**的（走 crypto.subtle.digest），必须 await。
+// deriveKey is **async** (via crypto.subtle.digest) and must be awaited.
 //
-// 之前这里写成 `return deriveKey(...)` —— 于是返回的是 Promise 而不是 key 字符串。
-// 症状非常隐蔽：Promise 被当作对象键使用（"[object Promise]"），
-// 所有 key 都"对得上"（因为都错了同样多），于是"父目录变了 → move"
-// 这类断言报 result.moved === 0，看起来像 apply 的 move 逻辑坏了，
-// 实际是测试传了个垃圾 key。
+// It was once written as `return deriveKey(...)` — returning a Promise
+// instead of a key string. The symptom is subtle: Promises used as object
+// keys ("[object Promise]") all "match" (all wrong by the same amount), so
+// assertions like "parent changed -> move" report result.moved === 0 and look
+// like broken move logic in apply, when the test really passed a junk key.
 const keyOf = (type, parts) => deriveKey(type, parts);
 
-// ── 计划：什么都不该做时就不发任何调用 ────────────────────────────
+// ── Plan: no writes when nothing should happen ────────────────────────
 
-test('★ 状态与本地一致时不产生任何写操作', async () => {
+test('no write ops when state already matches local', async () => {
   const bm = new MockBookmarks();
-  const f = bm.addFolder(ROOT_TOOLBAR, '目录');
-  bm.addBookmark(f, '书签', 'https://x.example');
+  const folderId = bm.addFolder(ROOT_TOOLBAR, 'Folder');
+  bm.addBookmark(folderId, 'Bookmark', 'https://x.example');
 
-  // 先采集一次，把结果当作"服务端返回的状态"
-  const s = await live(bm);
+  // Collect once, treat the result as "the server-returned state"
+  const scanned = await live(bm);
   const asState = {
     v: SCHEMA_VERSION,
     items: Object.fromEntries(
-      [...s.nodes].map(([key, n]) => [key, item(n.type, n.parentKey, n.title, n.url)]),
+      [...scanned.nodes].map(([key, node]) => [key, item(node.type, node.parentKey, node.title, node.url)]),
     ),
   };
 
-  const plan = planApply(s.nodes, asState, s.ffKeyToId);
+  const plan = planApply(scanned.nodes, asState, scanned.firefoxIdBySyncKey);
   assert.equal(plan.counts.create, 0);
   assert.equal(plan.counts.update, 0);
   assert.equal(plan.counts.remove, 0);
@@ -76,379 +79,380 @@ test('★ 状态与本地一致时不产生任何写操作', async () => {
 
   bm.clearCalls();
   const res = await executePlan(bm, plan);
-  assert.equal(bm.ops().length, 0, `不该有任何 API 调用，实际: ${bm.ops()}`);
+  assert.equal(bm.ops().length, 0, `expected no API calls, got: ${bm.ops()}`);
   assert.deepEqual(res, { created: 0, updated: 0, moved: 0, deleted: 0, failed: [] });
 });
 
-// ── 创建 ────────────────────────────────────────────────────────────
+// ── Creates ───────────────────────────────────────────────────────────
 
-test('把云端书签建到本地', async () => {
+test('creates a cloud bookmark locally', async () => {
   const bm = new MockBookmarks();
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://new.example' });
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://new.example' });
 
   const { result, after } = await apply(bm, stateOf({
-    [bk]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '云端来的', 'https://new.example'),
+    [bookmarkKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'From cloud', 'https://new.example'),
   }));
 
   assert.equal(result.created, 1);
   assert.equal(result.failed.length, 0);
   assert.equal(after.nodes.size, 1);
-  const created = [...bm.nodes.values()].find((n) => n.url === 'https://new.example');
-  assert.ok(created, '应创建出这条书签');
-  assert.equal(created.parentId, ROOT_TOOLBAR, '顶层项应挂到根目录');
+  const created = [...bm.nodes.values()].find((node) => node.url === 'https://new.example');
+  assert.ok(created, 'should create this bookmark');
+  assert.equal(created.parentId, ROOT_TOOLBAR, 'top-level items hang under the root');
 });
 
-test('★ 父文件夹与其子项：父先建、子后建', async () => {
-  // 这是最关键的一条顺序约束。create 的 parentId 必须是已存在的 id，
-  // 否则整棵子树会失败。
+test('parent folder and children: parent first, children after', async () => {
+  // The most critical ordering constraint. create needs an existing parent
+  // id, or the whole subtree fails.
   const bm = new MockBookmarks();
-  const fk = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: '目录' });
-  const c1k = await keyOf(TYPE_BOOKMARK, { url: 'https://one.example' });
-  const c2k = await keyOf(TYPE_BOOKMARK, { url: 'https://two.example' });
+  const folderKey = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'Folder' });
+  const childOneKey = await keyOf(TYPE_BOOKMARK, { url: 'https://one.example' });
+  const childTwoKey = await keyOf(TYPE_BOOKMARK, { url: 'https://two.example' });
 
   const { result, after } = await apply(bm, stateOf({
-    [c1k]: item(TYPE_BOOKMARK, fk, '一', 'https://one.example'),
-    [fk]: item(TYPE_FOLDER, ROOT_TOOLBAR, '目录'),
-    [c2k]: item(TYPE_BOOKMARK, fk, '二', 'https://two.example'),
+    [childOneKey]: item(TYPE_BOOKMARK, folderKey, 'One', 'https://one.example'),
+    [folderKey]: item(TYPE_FOLDER, ROOT_TOOLBAR, 'Folder'),
+    [childTwoKey]: item(TYPE_BOOKMARK, folderKey, 'Two', 'https://two.example'),
   }));
 
-  assert.equal(result.failed.length, 0, `不应有失败: ${JSON.stringify(result.failed)}`);
+  assert.equal(result.failed.length, 0, `no failures expected: ${JSON.stringify(result.failed)}`);
   assert.equal(result.created, 3);
 
-  // 执行顺序：父目录的 create 必须排在子项之前
-  const creates = bm.calls.filter((c) => c.op === 'create');
-  const folderIdx = creates.findIndex((c) => c.details.title === '目录');
-  assert.ok(folderIdx >= 0, '应创建了目录');
-  for (const [i, c] of creates.entries()) {
-    if (c.details.title !== '目录') {
-      assert.ok(i > folderIdx,
-        `${c.details.title} 的 create 出现在目录之前（第 ${i} vs ${folderIdx}）`);
+  // Execution order: the folder create must precede the children
+  const creates = bm.calls.filter((call) => call.op === 'create');
+  const folderIdx = creates.findIndex((call) => call.details.title === 'Folder');
+  assert.ok(folderIdx >= 0, 'should create the folder');
+  for (const [index, call] of creates.entries()) {
+    if (call.details.title !== 'Folder') {
+      assert.ok(index > folderIdx,
+        `${call.details.title} create ran before the folder (${index} vs ${folderIdx})`);
     }
   }
   assert.equal(after.nodes.size, 3);
 });
 
-test('三级嵌套也能正确建立', async () => {
+test('three-level nesting builds correctly', async () => {
   const bm = new MockBookmarks();
-  const l1 = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'L1' });
-  const l2 = await keyOf(TYPE_FOLDER, { parentKey: l1, title: 'L2' });
+  const levelOne = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'L1' });
+  const levelTwo = await keyOf(TYPE_FOLDER, { parentKey: levelOne, title: 'L2' });
   const leaf = await keyOf(TYPE_BOOKMARK, { url: 'https://leaf.example' });
 
   const { result, after } = await apply(bm, stateOf({
-    [leaf]: item(TYPE_BOOKMARK, l2, '叶子', 'https://leaf.example'),
-    [l2]: item(TYPE_FOLDER, l1, 'L2'),
-    [l1]: item(TYPE_FOLDER, ROOT_TOOLBAR, 'L1'),
+    [leaf]: item(TYPE_BOOKMARK, levelTwo, 'Leaf', 'https://leaf.example'),
+    [levelTwo]: item(TYPE_FOLDER, levelOne, 'L2'),
+    [levelOne]: item(TYPE_FOLDER, ROOT_TOOLBAR, 'L1'),
   }));
 
   assert.equal(result.failed.length, 0, JSON.stringify(result.failed));
   assert.equal(result.created, 3);
   assert.equal(after.nodes.size, 3);
 
-  // 验证层级真的建对了：从叶子往上追溯，每级 parentId 都对得上。
-  // （不能用 bm.nodes 里的 depth —— 那是 scan() 产出的，mock 节点没有）
-  const leafNode = [...bm.nodes.values()].find((n) => n.url === 'https://leaf.example');
+  // Verify the levels really link up: trace from the leaf upward.
+  // (Do not use depth from bm.nodes — that is scan() output; mock nodes lack it.)
+  const leafNode = [...bm.nodes.values()].find((node) => node.url === 'https://leaf.example');
   const l2Node = bm.nodes.get(leafNode.parentId);
   const l1Node = bm.nodes.get(l2Node.parentId);
-  assert.equal(l2Node.title, 'L2', '叶子的父级应是 L2');
-  assert.equal(l1Node.title, 'L1', 'L2 的父级应是 L1');
-  assert.equal(l1Node.parentId, ROOT_TOOLBAR, 'L1 挂在根目录下');
+  assert.equal(l2Node.title, 'L2', 'leaf parent should be L2');
+  assert.equal(l1Node.title, 'L1', 'L2 parent should be L1');
+  assert.equal(l1Node.parentId, ROOT_TOOLBAR, 'L1 hangs under the root');
 });
 
-// ── 更新 ────────────────────────────────────────────────────────────
+// ── Updates ───────────────────────────────────────────────────────────
 
-test('标题变了 → update', async () => {
+test('title change -> update', async () => {
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '旧标题', 'https://x.example');
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://x.example' });
+  bm.addBookmark(ROOT_TOOLBAR, 'Old title', 'https://x.example');
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://x.example' });
 
   const { result } = await apply(bm, stateOf({
-    [bk]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '新标题', 'https://x.example', 2000),
+    [bookmarkKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'New title', 'https://x.example', 2000),
   }));
 
   assert.equal(result.updated, 1);
   assert.equal(result.created, 0);
-  const node = [...bm.nodes.values()].find((n) => n.url === 'https://x.example');
-  assert.equal(node.title, '新标题');
+  const node = [...bm.nodes.values()].find((candidate) => candidate.url === 'https://x.example');
+  assert.equal(node.title, 'New title');
 });
 
-test('URL 变了 → 云端只声明新 URL，旧 URL 因不在状态里而被删除', async () => {
+test('URL change -> cloud declares only the new URL, the old one is deleted as absent', async () => {
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '标题', 'https://old.example');
+  bm.addBookmark(ROOT_TOOLBAR, 'Title', 'https://old.example');
   const newKey = await keyOf(TYPE_BOOKMARK, { url: 'https://new.example' });
 
   const { result } = await apply(bm, stateOf({
-    [newKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '标题', 'https://new.example'),
+    [newKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'Title', 'https://new.example'),
   }));
 
-  assert.equal(result.created, 1, '新 URL 是新身份');
-  assert.equal(result.deleted, 1, '旧 URL 不在云端状态里 → 本地那条应被删');
-  const urls = [...bm.nodes.values()].map((n) => n.url).filter(Boolean);
+  assert.equal(result.created, 1, 'new URL is a new identity');
+  assert.equal(result.deleted, 1, 'old URL missing from cloud state -> local copy deleted');
+  const urls = [...bm.nodes.values()].map((node) => node.url).filter(Boolean);
   assert.deepEqual(urls, ['https://new.example'],
-    '本地应只剩云端声明的那条');
+    'only the cloud-declared entry should remain locally');
 });
 
-test('★ 用户本地有、云端完全没提的书签会被删除', async () => {
-  // 这是"云端是权威状态"的直接后果。听起来激进，但它正是
-  // "在公司电脑删掉的东西，这边也会消失"所需要的语义。
+test('local-only bookmarks the cloud never mentions get deleted', async () => {
+  // Direct consequence of "cloud is authoritative". Sounds aggressive, but it
+  // is exactly the "deleted on the work PC disappears here" semantic.
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '只在本地有', 'https://local-only.example');
+  bm.addBookmark(ROOT_TOOLBAR, 'Local only', 'https://local-only.example');
 
   const { result } = await apply(bm, stateOf({}));
   assert.equal(result.deleted, 1);
-  assert.equal([...bm.nodes.values()].some((n) => n.url), false);
+  assert.equal([...bm.nodes.values()].some((node) => node.url), false);
 });
 
-// ── 移动 ────────────────────────────────────────────────────────────
+// ── Moves ─────────────────────────────────────────────────────────────
 
-test('父目录变了 → move（key 不变）', async () => {
+test('parent change -> move (key unchanged)', async () => {
   const bm = new MockBookmarks();
-  const f1 = bm.addFolder(ROOT_TOOLBAR, '目录一');
-  const f2 = bm.addFolder(ROOT_MENU, '目录二');
-  bm.addBookmark(f1, '会动', 'https://move.example');
+  const folderOne = bm.addFolder(ROOT_TOOLBAR, 'Folder one');
+  const folderTwo = bm.addFolder(ROOT_MENU, 'Folder two');
+  bm.addBookmark(folderOne, 'Moving', 'https://move.example');
 
-  const f1k = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: '目录一' });
-  const f2k = await keyOf(TYPE_FOLDER, { parentKey: ROOT_MENU, title: '目录二' });
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://move.example' });
+  const folderOneKey = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'Folder one' });
+  const folderTwoKey = await keyOf(TYPE_FOLDER, { parentKey: ROOT_MENU, title: 'Folder two' });
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://move.example' });
 
   const { result } = await apply(bm, stateOf({
-    [f1k]: item(TYPE_FOLDER, ROOT_TOOLBAR, '目录一'),
-    [f2k]: item(TYPE_FOLDER, ROOT_MENU, '目录二'),
-    [bk]: item(TYPE_BOOKMARK, f2k, '会动', 'https://move.example', 2000),
+    [folderOneKey]: item(TYPE_FOLDER, ROOT_TOOLBAR, 'Folder one'),
+    [folderTwoKey]: item(TYPE_FOLDER, ROOT_MENU, 'Folder two'),
+    [bookmarkKey]: item(TYPE_BOOKMARK, folderTwoKey, 'Moving', 'https://move.example', 2000),
   }));
 
   assert.equal(result.moved, 1);
-  assert.equal(result.created, 0, '移动不应被当成删除+新建');
-  const node = [...bm.nodes.values()].find((n) => n.url === 'https://move.example');
-  assert.equal(node.parentId, f2);
+  assert.equal(result.created, 0, 'a move must not count as delete+create');
+  const node = [...bm.nodes.values()].find((candidate) => candidate.url === 'https://move.example');
+  assert.equal(node.parentId, folderTwo);
 });
 
-// ── ★ 删除 ──────────────────────────────────────────────────────────
+// ── Deletes ───────────────────────────────────────────────────────────
 
-test('★ 云端已删、本地还在 → 本地删除', async () => {
+test('remotely deleted, locally present -> deleted locally', async () => {
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '要被删', 'https://gone.example');
+  bm.addBookmark(ROOT_TOOLBAR, 'To delete', 'https://gone.example');
 
   const { result, after } = await apply(bm, stateOf({}));
 
   assert.equal(result.deleted, 1);
   assert.equal(after.nodes.size, 0);
-  assert.equal([...bm.nodes.values()].some((n) => n.url === 'https://gone.example'), false);
+  assert.equal([...bm.nodes.values()].some((node) => node.url === 'https://gone.example'), false);
 });
 
-test('★ 删除文件夹只发一次 remove（利用 Firefox 的递归语义）', async () => {
-  // Firefox 的 bookmarks.remove 对文件夹是递归的。若对子项也发一次 remove，
-  // 那次调用会因为节点已被连带删除而报错。
+test('deleting a folder sends one remove (using Firefox recursive semantics)', async () => {
+  // bookmarks.remove on a folder is recursive. A second remove on a child
+  // would fail because the node is already gone with it.
   const bm = new MockBookmarks();
-  const f = bm.addFolder(ROOT_TOOLBAR, '目录');
-  const sub = bm.addFolder(f, '子目录');
-  bm.addBookmark(f, '子书签', 'https://a.example');
-  bm.addBookmark(sub, '孙书签', 'https://b.example');
+  const folderId = bm.addFolder(ROOT_TOOLBAR, 'Folder');
+  const subId = bm.addFolder(folderId, 'Subfolder');
+  bm.addBookmark(folderId, 'Child', 'https://a.example');
+  bm.addBookmark(subId, 'Grandchild', 'https://b.example');
 
   const { result, after } = await apply(bm, stateOf({}));
 
-  assert.equal(result.deleted, 1, '整棵子树只需一次 remove');
-  assert.equal(bm.countOp('remove'), 1, `实际发了几次: ${bm.countOp('remove')}`);
+  assert.equal(result.deleted, 1, 'one remove covers the whole subtree');
+  assert.equal(bm.countOp('remove'), 1, `actual remove count: ${bm.countOp('remove')}`);
   assert.equal(after.nodes.size, 0);
   assert.equal(result.failed.length, 0, JSON.stringify(result.failed));
 });
 
-test('★ 先删后建：不能因为"本地已存在"而跳过应删的项', async () => {
-  // 若顺序反了，本地被删的项会先被判成"存在"而被保留。
+test('delete-before-create: doomed items must not be skipped as "already present"', async () => {
+  // With the order reversed, locally doomed items look "present" and survive.
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '云端已删', 'https://deleted.example');
+  bm.addBookmark(ROOT_TOOLBAR, 'Deleted remotely', 'https://deleted.example');
 
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://kept.example' });
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://kept.example' });
   const { result, after } = await apply(bm, stateOf({
-    [bk]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '云端还在的', 'https://kept.example'),
+    [bookmarkKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'Still on cloud', 'https://kept.example'),
   }));
 
   assert.equal(result.deleted, 1);
   assert.equal(result.created, 1);
-  const urls = [...after.nodes.values()].map((n) => n.url).filter(Boolean);
-  assert.deepEqual(urls, ['https://kept.example'], '应只剩云端声明的那条');
+  const urls = [...after.nodes.values()].map((node) => node.url).filter(Boolean);
+  assert.deepEqual(urls, ['https://kept.example'], 'only the cloud-declared entry should remain');
 });
 
-// ── 类型变更 ────────────────────────────────────────────────────────
+// ── Type changes ──────────────────────────────────────────────────────
 
-test('书签变文件夹 → 删了重建（update 不支持改类型）', async () => {
+test('bookmark turned folder -> delete + recreate (update cannot change types)', async () => {
   const bm = new MockBookmarks();
-  bm.addBookmark(ROOT_TOOLBAR, '曾是书签', 'https://x.example');
-  const k = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: '曾是书签' });
+  bm.addBookmark(ROOT_TOOLBAR, 'Was a bookmark', 'https://x.example');
+  const key = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'Was a bookmark' });
 
   const { result } = await apply(bm, stateOf({
-    [k]: item(TYPE_FOLDER, ROOT_TOOLBAR, '曾是书签', undefined, 2000),
+    [key]: item(TYPE_FOLDER, ROOT_TOOLBAR, 'Was a bookmark', undefined, 2000),
   }));
 
-  assert.equal(result.created, 1, '应重建');
-  assert.equal(bm.countOp('remove'), 1, '旧的应被移除');
+  assert.equal(result.created, 1, 'should rebuild');
+  assert.equal(bm.countOp('remove'), 1, 'old one should be removed');
   assert.equal(result.failed.length, 0, JSON.stringify(result.failed));
 });
 
-// ── 健壮性 ──────────────────────────────────────────────────────────
+// ── Robustness ────────────────────────────────────────────────────────
 
-test('★ 父目录不在云端状态里 → 记入 skipped，不丢到根目录', async () => {
-  // 静默把书签挪到"其他书签"下面比报错更糟：用户不会发现，
-  // 直到某天找不到它了。
+test('parent missing from cloud state -> skipped, never parked at the root', async () => {
+  // Silently moving a bookmark under "Other Bookmarks" is worse than an
+  // error: the user never notices until it is lost one day.
   const bm = new MockBookmarks();
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://orphan.example' });
-  const ghostParent = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: '不存在的目录' });
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://orphan.example' });
+  const ghostParent = await keyOf(TYPE_FOLDER, { parentKey: ROOT_TOOLBAR, title: 'Missing folder' });
 
   const { plan, result, after } = await apply(bm, stateOf({
-    [bk]: item(TYPE_BOOKMARK, ghostParent, '孤儿', 'https://orphan.example'),
+    [bookmarkKey]: item(TYPE_BOOKMARK, ghostParent, 'Orphan', 'https://orphan.example'),
   }));
 
   assert.equal(plan.skipped.length, 1);
   assert.equal(plan.skipped[0].reason, 'parent-missing');
-  assert.equal(result.created, 0, '不应被创建到别处');
-  assert.equal(after.nodes.size, 0, '本地不应出现任何东西');
+  assert.equal(result.created, 0, 'must not be created elsewhere');
+  assert.equal(after.nodes.size, 0, 'nothing should appear locally');
 });
 
-test('父链成环 → 不死循环，安全跳过', async () => {
+test('cyclic parent chain -> no infinite loop, safely skipped', async () => {
   const bm = new MockBookmarks();
-  const a = await keyOf(TYPE_FOLDER, { parentKey: 'x', title: 'A' });
-  const b = await keyOf(TYPE_FOLDER, { parentKey: 'x', title: 'B' });
+  const keyA = await keyOf(TYPE_FOLDER, { parentKey: 'x', title: 'A' });
+  const keyB = await keyOf(TYPE_FOLDER, { parentKey: 'x', title: 'B' });
 
   const { plan } = await apply(bm, stateOf({
-    [a]: item(TYPE_FOLDER, b, 'A'),
-    [b]: item(TYPE_FOLDER, a, 'B'),
+    [keyA]: item(TYPE_FOLDER, keyB, 'A'),
+    [keyB]: item(TYPE_FOLDER, keyA, 'B'),
   }));
-  assert.equal(plan.skipped.length, 2, '两个都应被跳过');
+  assert.equal(plan.skipped.length, 2, 'both should be skipped');
 });
 
-test('单个 create 失败不影响其他项', async () => {
+test('one failing create does not affect the others', async () => {
   const bm = new MockBookmarks();
   const okKey = await keyOf(TYPE_BOOKMARK, { url: 'https://ok.example' });
   const badKey = await keyOf(TYPE_BOOKMARK, { url: 'https://bad.example' });
 
-  // 只让第二个失败
-  let n = 0;
+  // Fail only the second one
+  let callCount = 0;
   const orig = bm.create.bind(bm);
-  bm.create = async (d) => {
-    n += 1;
-    if (n === 2) throw new Error('模拟失败');
-    return orig(d);
+  bm.create = async (details) => {
+    callCount += 1;
+    if (callCount === 2) throw new Error('Simulated failure');
+    return orig(details);
   };
 
   const { result, after } = await apply(bm, stateOf({
-    [okKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '好的', 'https://ok.example'),
-    [badKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, '坏的', 'https://bad.example'),
+    [okKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'Good', 'https://ok.example'),
+    [badKey]: item(TYPE_BOOKMARK, ROOT_TOOLBAR, 'Bad', 'https://bad.example'),
   }));
 
-  assert.equal(result.failed.length, 1, '失败应被记录而不是抛出');
-  assert.equal(result.created, 1, '另一个仍应成功');
+  assert.equal(result.failed.length, 1, 'failure recorded, not thrown');
+  assert.equal(result.created, 1, 'the other one still succeeds');
   assert.equal(after.nodes.size, 1);
 });
 
-test('删除已被用户手动删掉的节点不算失败', async () => {
+test('deleting a node the user already removed manually is not a failure', async () => {
   const bm = new MockBookmarks();
   bm.addBookmark(ROOT_TOOLBAR, 'x', 'https://x.example');
-  const s = await live(bm);
+  const scanned = await live(bm);
 
-  // 云端状态里没有它 → 计划会删除
-  const plan = planApply(s.nodes, stateOf({}), s.ffKeyToId);
+  // Cloud state omits it -> plan deletes
+  const plan = planApply(scanned.nodes, stateOf({}), scanned.firefoxIdBySyncKey);
   assert.equal(plan.counts.remove, 1);
 
-  // 但在执行前它已经被用户删了
-  const id = [...bm.nodes.values()].find((n) => n.url === 'https://x.example').id;
+  // But the user deleted it before execution
+  const id = [...bm.nodes.values()].find((node) => node.url === 'https://x.example').id;
   await bm.remove(id);
 
   const res = await executePlan(bm, plan);
-  assert.equal(res.failed.length, 0, '节点已不存在不该记为失败');
+  assert.equal(res.failed.length, 0, 'an already-gone node must not count as failed');
 });
 
-test('空的 incoming state → 删掉本地全部', async () => {
+test('empty incoming state -> deletes everything local', async () => {
   const bm = new MockBookmarks();
-  const f = bm.addFolder(ROOT_TOOLBAR, '目录');
-  bm.addBookmark(f, '一', 'https://one.example');
-  bm.addBookmark(ROOT_MENU, '二', 'https://two.example');
+  const folderId = bm.addFolder(ROOT_TOOLBAR, 'Folder');
+  bm.addBookmark(folderId, 'One', 'https://one.example');
+  bm.addBookmark(ROOT_MENU, 'Two', 'https://two.example');
 
   const { result, after } = await apply(bm, { v: SCHEMA_VERSION, items: {} });
   assert.ok(result.deleted >= 1);
   assert.equal(after.nodes.size, 0);
 });
 
-test('incoming 缺 items 字段 → 当作空处理', async () => {
+test('incoming without items field -> treated as empty', async () => {
   const bm = new MockBookmarks();
   bm.addBookmark(ROOT_TOOLBAR, 'x', 'https://x.example');
   const { after } = await apply(bm, { v: SCHEMA_VERSION });
   assert.equal(after.nodes.size, 0);
 });
 
-test('墓碑不会落到本地书签树里', async () => {
+test('tombstones never land in the local bookmark tree', async () => {
   const bm = new MockBookmarks();
-  const bk = await keyOf(TYPE_BOOKMARK, { url: 'https://x.example' });
+  const bookmarkKey = await keyOf(TYPE_BOOKMARK, { url: 'https://x.example' });
   await apply(bm, stateOf({
-    [bk]: { p: ROOT_TOOLBAR, t: 'b', n: '已删', u: 'https://x.example',
+    [bookmarkKey]: { p: ROOT_TOOLBAR, t: 'b', n: 'Deleted', u: 'https://x.example',
             a: encode(1, 0), m: encode(2, 0), d: true, x: 1700000000000 },
   }));
-  assert.equal([...bm.nodes.values()].some((n) => n.url === 'https://x.example'), false,
-    '墓碑只是"删除的事实"，不该在本地留下一条记录');
+  assert.equal([...bm.nodes.values()].some((node) => node.url === 'https://x.example'), false,
+    'a tombstone is just "the fact of deletion", not a record to keep locally');
 });
 
-// ── 往返一致性 ──────────────────────────────────────────────────────
+// ── Round-trip consistency ──────────────────────────────────────────
 
-test('★ 往返：collect 出的 state 落到空树后，再 collect 应语义等价', async () => {
-  // 这是采集与应用组合起来最强的一条性质。
-  // 采集在 A 上跑 → 应用到空的 B → 在 B 上再采集 → 结果应与 A 等价。
+test('round-trip: state collected here lands on an empty tree and re-collects equivalently', async () => {
+  // The strongest combined property of collect + apply.
+  // Collect on A -> apply to empty B -> collect on B -> equivalent result.
   const source = new MockBookmarks();
-  const a = source.addFolder(ROOT_TOOLBAR, '工作');
-  const b = source.addFolder(a, '子目录');
-  source.addBookmark(a, '一', 'https://one.example');
-  source.addBookmark(b, '二', 'https://two.example');
-  source.addBookmark(ROOT_UNFILED, '三', 'https://three.example');
+  const folderA = source.addFolder(ROOT_TOOLBAR, 'Work');
+  const folderB = source.addFolder(folderA, 'Subfolder');
+  source.addBookmark(folderA, 'One', 'https://one.example');
+  source.addBookmark(folderB, 'Two', 'https://two.example');
+  source.addBookmark(ROOT_UNFILED, 'Three', 'https://three.example');
 
-  const s1 = await live(source);
-  const asState = buildState(s1, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
+  const firstScan = await live(source);
+  const asState = buildState(firstScan, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
 
   const target = new MockBookmarks();
   const { result, after } = await apply(target, asState.state);
   assert.equal(result.failed.length, 0, JSON.stringify(result.failed));
 
-  // 在目标树上重新采集
-  const round2 = buildState(after, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
+  // Re-collect on the target tree
+  const roundTwo = buildState(after, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
 
-  assert.equal(Object.keys(round2.state.items).length, Object.keys(asState.state.items).length,
-    `项数应一致：源 ${Object.keys(asState.state.items).length} vs 目标 ${Object.keys(round2.state.items).length}`);
+  assert.equal(Object.keys(roundTwo.state.items).length, Object.keys(asState.state.items).length,
+    `item counts should match: source ${Object.keys(asState.state.items).length} vs target ${Object.keys(roundTwo.state.items).length}`);
 
   for (const [key, orig] of Object.entries(asState.state.items)) {
-    const back = round2.state.items[key];
-    assert.ok(back, `往返后丢了 ${key}`);
-    assert.equal(back.t, orig.t, `${key} 类型变了`);
-    assert.equal(back.n, orig.n, `${key} 标题变了`);
-    assert.equal(back.u, orig.u, `${key} URL 变了`);
-    assert.equal(back.p, orig.p, `${key} 父级变了`);
+    const back = roundTwo.state.items[key];
+    assert.ok(back, `lost ${key} on the round-trip`);
+    assert.equal(back.t, orig.t, `${key} type changed`);
+    assert.equal(back.n, orig.n, `${key} title changed`);
+    assert.equal(back.u, orig.u, `${key} URL changed`);
+    assert.equal(back.p, orig.p, `${key} parent changed`);
   }
 });
 
-test('★ 往返：删除后再往返，墓碑应稳定', async () => {
+test('round-trip: tombstones stay stable after delete + round-trip', async () => {
   const source = new MockBookmarks();
-  const f = source.addFolder(ROOT_TOOLBAR, '要删的');
-  source.addBookmark(f, '子项', 'https://gone.example');
-  source.addBookmark(ROOT_TOOLBAR, '保留', 'https://keep.example');
+  const folderId = source.addFolder(ROOT_TOOLBAR, 'To delete');
+  source.addBookmark(folderId, 'Child', 'https://gone.example');
+  source.addBookmark(ROOT_TOOLBAR, 'Keep', 'https://keep.example');
 
-  // 第一次同步：两台设备都有
-  const s1 = await live(source);
-  const asState = buildState(s1, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
+  // First sync: both devices have everything
+  const firstScan = await live(source);
+  const asState = buildState(firstScan, { v: SCHEMA_VERSION, items: {} }, clock, clockMs);
   assert.equal(Object.keys(asState.state.items).length, 3,
-    '首次采集应产出 3 项（目录 + 子书签 + 保留），不含系统根目录本身');
+    'first collect yields 3 items (folder + child + keep), excluding system roots');
 
   const deviceB = new MockBookmarks();
   await apply(deviceB, asState.state);
   assert.equal((await live(deviceB)).nodes.size, 3);
 
-  // 在 A 上删掉整个目录，采集
-  await source.remove(f);
+  // Delete the whole folder on A, collect
+  await source.remove(folderId);
   clockMs += 1000;
-  const s2 = await live(source);
-  const afterDelete = buildState(s2, asState.state, clock, clockMs);
-  // 树里原有 3 项（目录 + 子书签 + 保留），删掉目录连同子书签 = 2 个墓碑
-  assert.equal(afterDelete.stats.deleted, 2, '目录 + 子书签，两个墓碑');
-  assert.equal(afterDelete.stats.unchanged, 1, '"保留"那条未变，不该被打时间戳');
+  const secondScan = await live(source);
+  const afterDelete = buildState(secondScan, asState.state, clock, clockMs);
+  // The tree held 3 items (folder + child + keep); deleting the folder with
+  // its child = 2 tombstones
+  assert.equal(afterDelete.stats.deleted, 2, 'folder + child, two tombstones');
+  assert.equal(afterDelete.stats.unchanged, 1, '"keep" is untouched and must not be restamped');
 
-  // 同步到 B：应该被删掉
+  // Sync to B: should delete
   const { result, after: bAfter } = await apply(deviceB, afterDelete.state);
-  assert.ok(result.deleted >= 1, 'B 上应执行删除');
-  const remaining = [...bAfter.nodes.values()].filter((n) => n.url);
-  assert.equal(remaining.length, 1, '只剩"保留"那条');
+  assert.ok(result.deleted >= 1, 'B should run deletes');
+  const remaining = [...bAfter.nodes.values()].filter((node) => node.url);
+  assert.equal(remaining.length, 1, 'only "keep" remains');
   assert.equal(remaining[0].url, 'https://keep.example');
 });

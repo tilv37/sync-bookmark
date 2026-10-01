@@ -1,12 +1,12 @@
 #!/bin/sh
-# 备份 bmsync 数据目录。
+# Back up the bmsync data directory.
 #
-# 装 crontab：  crontab -e   然后加一行
+# Install in crontab:  crontab -e   then add
 #   17 3 * * *  /opt/bmsync/deploy/backup.sh >> /var/log/bmsync-backup.log 2>&1
 #
-# 为什么重要：data/ 里装着唯一的权威状态。虽然 history/ 里有 30 份快照，
-# 但那些是"同步过程中的中间态"，不是"我今天备份过的状态"。真出问题时
-# 你想要的是一份可以直接恢复的整体备份。
+# Why it matters: data/ holds the only authoritative state. history/ keeps 30
+# snapshots, but those are "in-flight intermediate states", not "a state I
+# backed up today". When things go wrong you want a restorable whole backup.
 
 set -eu
 
@@ -18,15 +18,16 @@ OUT="backup/data-$STAMP.tar.gz"
 
 mkdir -p backup
 
-# --exclude 排掉可能残留的临时文件：它只在校验通过后才被 rename 生效，
-# 备份它没有意义。
+# --exclude drops a possible leftover temp file: it only takes effect via
+# rename after validation, so backing it up is pointless.
 tar -czf "$OUT" \
     --exclude='data/state.json.tmp' \
     data/
 
-# 只保留最近 KEEP 份
+# Keep only the latest KEEP archives
 ls -1t backup/data-*.tar.gz 2>/dev/null | tail -n "+$((KEEP + 1))" | xargs -r rm --
 
-# 提示人工异地备份。这个脚本不做上传 —— 你把备份放哪里取决于你信谁。
-echo "$(date -u +%FT%TZ) 备份完成: $OUT ($(du -h "$OUT" | cut -f1))"
-echo "  保留最近 $KEEP 份。当前份数: $(ls -1 backup/data-*.tar.gz 2>/dev/null | wc -l)"
+# Remind about off-site copies. This script never uploads — where backups go
+# depends on whom you trust.
+echo "$(date -u +%FT%TZ) backup done: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "  Keeping latest $KEEP. Current count: $(ls -1 backup/data-*.tar.gz 2>/dev/null | wc -l)"

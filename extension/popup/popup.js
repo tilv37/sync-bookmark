@@ -1,9 +1,11 @@
-// popup.js —— 工具栏弹窗
+// popup.js — toolbar popup
 //
-// 只做两件事：发起同步、展示结果。所有逻辑在 background 里，这里不发业务逻辑。
-// 原因：弹窗的 DOM 生命周期很短（关掉就没了），同步可能跑十几秒，
-// 状态必须放在 background 才不会丢。
-// 例外：host 权限申请必须在点击手势里调，只能由本页直接调。
+// Only two jobs: start a sync and show the result. All logic lives in
+// background; this page holds no business logic.
+// Reason: the popup DOM is short-lived (gone once closed) while a sync can
+// run for many seconds, so state must live in background to survive.
+// Exception: host permission must be requested in the click gesture, so only
+// this page can call it directly.
 
 import { requestHostPermissionFromGesture } from '../lib/client.js';
 
@@ -15,7 +17,7 @@ let cachedServerUrl = '';
 function setBusy(on) {
   busy = on;
   $('sync').disabled = on;
-  $('sync').textContent = on ? '同步中…' : '立即同步';
+  $('sync').textContent = on ? 'Syncing…' : 'Sync now';
 }
 
 function show(kind, text) {
@@ -25,45 +27,45 @@ function show(kind, text) {
 }
 
 function fmtTime(ms) {
-  if (!ms) return '从未同步';
+  if (!ms) return 'Never synced';
   const diff = Date.now() - ms;
-  if (diff < 60_000) return '刚刚';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 60_000) return 'Just now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} min ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} hours ago`;
   return new Date(ms).toLocaleString();
 }
 
-function fmtSummary(r) {
-  const a = r.applied || {};
+function fmtSummary(syncResult) {
+  const applied = syncResult.applied || {};
   const bits = [];
-  if (a.created) bits.push(`新增 ${a.created}`);
-  if (a.updated) bits.push(`更新 ${a.updated}`);
-  if (a.moved) bits.push(`移动 ${a.moved}`);
-  if (a.deleted) bits.push(`删除 ${a.deleted}`);
-  if (!bits.length) bits.push('无变化');
+  if (applied.created) bits.push(`Added ${applied.created}`);
+  if (applied.updated) bits.push(`Updated ${applied.updated}`);
+  if (applied.moved) bits.push(`Moved ${applied.moved}`);
+  if (applied.deleted) bits.push(`Deleted ${applied.deleted}`);
+  if (!bits.length) bits.push('No changes');
 
-  const total = r.server
-    ? `云端共 ${r.server.created + r.server.updated + r.server.deleted + r.server.unchanged} 项`
+  const total = syncResult.server
+    ? `Cloud holds ${syncResult.server.created + syncResult.server.updated + syncResult.server.deleted + syncResult.server.unchanged} items`
     : '';
-  return `${bits.join('，')}${total ? ' · ' + total : ''}`;
+  return `${bits.join(', ')}${total ? ' · ' + total : ''}`;
 }
 
 async function refresh() {
   const res = await browser.runtime.sendMessage({ type: 'getState' });
   if (!res || !res.ok) {
-    show('err', res?.error || '读取状态失败');
+    show('err', res?.error || 'Failed to read state');
     return;
   }
-  $('last-sync').textContent = `上次同步：${fmtTime(res.meta?.lastSyncAt)}`;
+  $('last-sync').textContent = `Last sync: ${fmtTime(res.meta?.lastSyncAt)}`;
   $('cached').textContent = res.cachedItems
-    ? `本地缓存 ${res.cachedItems} 项`
-    : '尚未同步过，本地无缓存';
+    ? `Local cache: ${res.cachedItems} items`
+    : 'Not synced yet, no local cache';
 
-  const s = res.settings || {};
-  cachedServerUrl = s.serverUrl || '';
-  const configured = Boolean(s.serverUrl && s.token);
+  const settings = res.settings || {};
+  cachedServerUrl = settings.serverUrl || '';
+  const configured = Boolean(settings.serverUrl && settings.token);
   if (!configured) {
-    show('muted', '尚未配置服务器与令牌');
+    show('muted', 'Server and token are not configured yet');
     $('sync').disabled = true;
   }
   $('open-options').hidden = configured;
@@ -73,9 +75,10 @@ async function refresh() {
 async function doSync() {
   if (busy) return;
   setBusy(true);
-  show('muted', '同步中，请勿关闭浏览器…');
+  show('muted', 'Syncing, keep the browser open…');
   try {
-    // 手势上下文中第一时间调 request()：前面加任何 await 都会丢手势。
+    // Call request() first thing in the gesture context: any await before it
+    // drops the gesture.
     if (cachedServerUrl) {
       let granted = false;
       try {
@@ -85,29 +88,29 @@ async function doSync() {
         return;
       }
       if (!granted) {
-        show('err', '已拒绝站点访问权限，允许后才能同步');
+        show('err', 'Site access was denied; allow it before syncing');
         return;
       }
     }
     const res = await browser.runtime.sendMessage({ type: 'sync' });
     if (!res || !res.ok) {
-      console.error(`[bmsync] 同步失败：${res?.error || '同步失败'}`, res);
-      show('err', res?.error || '同步失败');
+      console.error(`[bmsync] Sync failed: ${res?.error || 'sync failed'}`, res);
+      show('err', res?.error || 'Sync failed');
       return;
     }
-    const r = res.result;
-    console.log('[bmsync] 同步成功', r);
-    if (r.partial) {
-      show('err', `部分完成：${fmtSummary(r)}。重试是安全的。`);
+    const syncResult = res.result;
+    console.log('[bmsync] Sync succeeded', syncResult);
+    if (syncResult.partial) {
+      show('err', `Partially done: ${fmtSummary(syncResult)}. Retrying is safe.`);
     } else {
-      show('ok', fmtSummary(r));
+      show('ok', fmtSummary(syncResult));
     }
-    if (r.clockWarning) $('clock-warning').textContent = r.clockWarning;
-    if (r.conflicts?.length) {
-      $('conflicts').textContent = `本次产生 ${r.conflicts.length} 条冲突（已静默按时间戳决胜）`;
+    if (syncResult.clockWarning) $('clock-warning').textContent = syncResult.clockWarning;
+    if (syncResult.conflicts?.length) {
+      $('conflicts').textContent = `${syncResult.conflicts.length} conflicts this run (resolved silently by timestamp)`;
     }
-    if (r.warnings?.length) {
-      $('warnings').textContent = r.warnings.join('；');
+    if (syncResult.warnings?.length) {
+      $('warnings').textContent = syncResult.warnings.join('; ');
     }
     await refresh();
   } finally {

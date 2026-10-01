@@ -1,20 +1,20 @@
 namespace BookmarkSync.Server;
 
 /// <summary>
-/// 按来源计数的令牌桶。
+/// Per-source token bucket.
 /// </summary>
 /// <remarks>
 /// <para>
-/// 为什么需要：这是一个暴露在公网（经由反代）的接口。虽然有 token 保护，
-/// 但如果没有限流，一个拿着 token 的脚本（或者单纯的好奇者反复试 token）
-/// 可以无限次打 /api/sync。每次请求都要做一次全量合并 + 落盘，
-/// 足够把一台小 VPS 打满。
+/// Why it exists: this endpoint faces the public internet (via reverse proxy). Token
+/// protection alone still lets a scripted client (or someone brute-forcing tokens)
+/// hit /api/sync without bound. Every request does a full merge + disk write,
+/// enough to saturate a small VPS.
 /// </para>
 /// <para>
-/// <b>为什么不用 ASP.NET Core 内置的限流中间件</b>：内置的
-/// <c>AddRateLimiter</c> 按 endpoint/策略名分桶，且令牌桶算法是"匀速补充"，
-/// 语义与本项目要的"每分钟固定 N 次"不同（前者允许突发，后者不允许）。
-/// 端口径变化会让"60 次/分钟"这个已在文档里写明的承诺悄悄变样。
+/// <b>Why not the built-in ASP.NET Core rate-limiting middleware</b>: the built-in
+/// <c>AddRateLimiter</c> buckets by endpoint/policy and refills steadily, which differs
+/// from this project's "fixed N per minute" (the former allows bursts, the latter does
+/// not). A quiet semantic change would break the documented "60/min" promise.
 /// </para>
 /// </remarks>
 public sealed class RateLimiter
@@ -38,7 +38,7 @@ public sealed class RateLimiter
         _lastGc = DateTimeOffset.UtcNow;
     }
 
-    /// <summary>判断这次请求是否放行，并消耗一个配额。</summary>
+    /// <summary>Decide whether this request passes, consuming one quota unit.</summary>
     public bool Allow(string key)
     {
         DateTimeOffset now = DateTimeOffset.UtcNow;
@@ -64,8 +64,8 @@ public sealed class RateLimiter
     }
 
     /// <summary>
-    /// 清理过期的桶。手工触发而非后台定时器：调用频率就是请求频率，
-    /// 不值得为它开一个后台任务。
+    /// Reap expired buckets. Triggered manually instead of a background timer: call
+    /// frequency equals request frequency, not worth a dedicated background task.
     /// </summary>
     private void Gc(DateTimeOffset now)
     {
@@ -90,7 +90,7 @@ public sealed class RateLimiter
         }
     }
 
-    /// <summary>仅供测试：直接写入一个桶，用来构造"窗口已滑过"的场景。</summary>
+    /// <summary>Tests only: write a bucket directly to simulate a slid window.</summary>
     internal void SeedBucket(string key, int count, DateTimeOffset start)
     {
         lock (_gate)
@@ -99,10 +99,10 @@ public sealed class RateLimiter
         }
     }
 
-    /// <summary>仅供测试：把上次 GC 时间推到过去。</summary>
+    /// <summary>Tests only: push the last-GC time into the past.</summary>
     internal void ForceGcDue() => _lastGc = DateTimeOffset.UtcNow - _window;
 
-    /// <summary>仅供测试：当前桶数量。</summary>
+    /// <summary>Tests only: current bucket count.</summary>
     internal int BucketCount
     {
         get
@@ -114,13 +114,13 @@ public sealed class RateLimiter
         }
     }
 
-    /// <summary>仅供测试：把额度改小，用来验证"第 N+1 次被拒"。</summary>
+    /// <summary>Tests only: shrink the limit to verify "request N+1 is rejected".</summary>
     /// <remarks>
-    /// 生产额度是 60 次/分钟。要测"超限被拒"就得真的打 61 次请求并等一分钟 ——
-    /// 那会让一个本该毫秒级的用例变成分钟级，久而久之大家就不写它了。
+    /// The production limit is 60/min. Testing "rejected when over limit" for real would mean
+    /// 61 requests plus a one-minute wait — turning a millisecond test into a minute-long one.
     /// <para>
-    /// 所以额度做成可变（而不是 readonly）并只暴露给测试程序集：改额度这件事
-    /// 本身是安全的，而"没人写这个测试"不是。
+    /// So the limit is mutable (not readonly) but exposed to tests only: changing the limit
+    /// is safe, while "nobody writes this test" is not.
     /// </para>
     /// </remarks>
     internal void OverrideLimitForTest(int limit)

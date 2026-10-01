@@ -1,12 +1,11 @@
-// extension/lib/client.js —— 与服务端通信
+// extension/lib/client.js — talking to the server
 //
-// 职责：把 fetch 的原始结果翻译成「可读的错误 + 结构化的数据」。
+// Job: translate raw fetch results into "readable errors + structured data".
 //
-// ── 最重要的一条规则 ──────────────────────────────────────────────────
-//
-// **任何非 200 响应都不得导致本地书签被修改。**
-// 调用方（sync 流程）必须遵守：先成功拿到 response，再去动 Firefox 树。
-// 见 design.md §9.6。
+// ── The most important rule ─────────────────────────────────────────────
+// **No non-200 response may ever mutate local bookmarks.**
+// The caller (sync flow) must obey: only touch the Firefox tree after a
+// successful response is in hand. See docs/architecture.md §4.
 
 import { saveMeta } from './store.js';
 
@@ -20,11 +19,11 @@ export const ERR_TIMEOUT = 'timeout';
 
 const DEFAULT_TIMEOUT_MS = 60_000;
 
-/** 把地址规范化成不带尾斜杠的 origin + /api 前缀。 */
+/** Normalize an address to origin + /api prefix without a trailing slash. */
 export function normalizeBaseUrl(raw) {
-  const s = String(raw || '').trim();
-  if (!s) return '';
-  const withScheme = /^https?:\/\//i.test(s) ? s : `https://${s}`;
+  const trimmedInput = String(raw || '').trim();
+  if (!trimmedInput) return '';
+  const withScheme = /^https?:\/\//i.test(trimmedInput) ? trimmedInput : `https://${trimmedInput}`;
   let url;
   try {
     url = new URL(withScheme);
@@ -32,32 +31,34 @@ export function normalizeBaseUrl(raw) {
     return '';
   }
   if (url.protocol !== 'https:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-    // 书签 URL 会经过公网传输，明文 HTTP 等于把浏览历史裸奔。
+    // Bookmark URLs travel over the public internet; cleartext HTTP exposes browsing history.
     return '';
   }
   return `${url.origin}/api`;
 }
 
-/** 当前配置下所需的 host 权限（不带端口：manifest 匹配不认端口）。 */
+/** Host permission required for the current config (no port: manifest matching ignores ports). */
 export function requiredOrigin(serverUrl) {
   try {
-    const u = new URL(serverUrl);
-    return `${u.protocol}//${u.hostname}/*`;
+    const parsed = new URL(serverUrl);
+    return `${parsed.protocol}//${parsed.hostname}/*`;
   } catch {
     return null;
   }
 }
 
 /**
- * 检查并申请 host 权限。
+ * Check and request host permission.
  *
- * Firefox 的 MV3 把站点权限从「安装时授予」改成了「用户手动授予」，
- * 所以首次同步一定会走到这里。见 design.md §9.3。
+ * Firefox MV3 moved site permission from "granted at install" to "granted
+ * manually by the user", so the first sync always lands here. See
+ * docs/architecture.md §7.
  *
- * ⚠️ 必须在用户手势上下文中调用（popup / options 的 click 处理里直接调）。
- * background 收到的 runtime.onMessage 已丢了手势，调 request() 会抛
- * "permissions.request may only be called from a user input handler"。
- * background 里只准用 hasHostPermission() 做 contains 检查。
+ * WARNING: must be called in a user-gesture context (directly in a popup /
+ * options click handler). background runtime.onMessage has lost the gesture,
+ * and request() there throws
+ * "permissions.request may only be called from a user input handler".
+ * In background, only hasHostPermission() (a contains check) is allowed.
  */
 export async function ensureHostPermission(serverUrl) {
   const origin = requiredOrigin(serverUrl);
@@ -66,18 +67,19 @@ export async function ensureHostPermission(serverUrl) {
   const has = await browser.permissions.contains({ origins: [origin] });
   if (has) return true;
 
-  // request() 必须在用户手势的上下文中调用，否则会被静默拒绝
+  // request() must run in a user-gesture context, or it is silently denied
   return browser.permissions.request({ origins: [origin] });
 }
 
 /**
- * 手势上下文专用的权限申请：同步调 request()，前面不做任何 await。
+ * Gesture-context permission request: call request() synchronously with no await before it.
  *
- * 为什么要另起一个函数：ensureHostPermission() 先 `await contains()` 再
- * `request()`，中间的 await 会把点击手势丢掉，Firefox 直接抛
- * "permissions.request may only be called from a user input handler"。
- * UI 的 click 处理里必须第一时间调 request()（requiredOrigin 是同步的，
- * 不丢手势）；已授权时 request() 直接返回 true，不会重复弹窗。
+ * Why a separate function: ensureHostPermission() awaits contains() before
+ * request(), and that await drops the click gesture, so Firefox throws
+ * "permissions.request may only be called from a user input handler".
+ * A UI click handler must call request() immediately (requiredOrigin is
+ * synchronous and keeps the gesture); when already granted, request()
+ * resolves true without a second prompt.
  */
 export function requestHostPermissionFromGesture(serverUrl) {
   const origin = requiredOrigin(serverUrl);
@@ -104,17 +106,18 @@ async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_T
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
-  // 请求摘要只打到本机控制台：方法、路径、body 字节、有无 token，不打 token 明文。
+  // Request summary goes to the local console only: method, path, body bytes,
+  // token presence — never the token itself.
   try {
     const bodyBytes = body ? JSON.stringify(body).length : 0;
-    const items = body?.state?.items ? Object.keys(body.state.items).length : null;
+    const itemCount = body?.state?.items ? Object.keys(body.state.items).length : null;
     console.log(
-      `[bmsync] → ${method} ${url} body约${bodyBytes}字节` +
-        (items !== null ? `（state ${items}项）` : '') +
-        (token ? '（带token）' : '（无token）'),
+      `[bmsync] -> ${method} ${url} body ~${bodyBytes}B` +
+        (itemCount !== null ? ` (state ${itemCount} items)` : '') +
+        (token ? ' (with token)' : ' (no token)'),
     );
   } catch {
-    // 日志失败不阻断请求
+    // Logging must never block the request
   }
 
   let resp;
@@ -130,9 +133,9 @@ async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_T
     });
   } catch (err) {
     if (err?.name === 'AbortError') {
-      throw new SyncError(ERR_TIMEOUT, '请求超时，请检查网络或服务端状态');
+      throw new SyncError(ERR_TIMEOUT, 'Request timed out; check the network or server status');
     }
-    throw new SyncError(ERR_NETWORK, `无法连接服务器：${err?.message || err}`);
+    throw new SyncError(ERR_NETWORK, `Cannot reach the server: ${err?.message || err}`);
   } finally {
     clearTimeout(timer);
   }
@@ -143,12 +146,12 @@ async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_T
     try {
       data = JSON.parse(text);
     } catch {
-      // 反代返回了 HTML 错误页是常见情况（比如 413/502）
+      // A reverse proxy returning an HTML error page is common (e.g. 413/502)
       if (!resp.ok) {
         throw new SyncError(
           ERR_SERVER,
-          `服务端返回了非 JSON 内容（HTTP ${resp.status}）。` +
-            '若是 413，请在 Nginx Proxy Manager 中调大 client_max_body_size。',
+          `Server returned non-JSON content (HTTP ${resp.status}).` +
+            'For 413, raise client_max_body_size in Nginx Proxy Manager.',
         );
       }
     }
@@ -157,61 +160,61 @@ async function request(url, { token, method = 'GET', body, timeoutMs = DEFAULT_T
   if (!resp.ok) {
     const syncErr = toSyncError(resp.status, data);
     try {
-      console.warn(`[bmsync] ← ${method} ${url} HTTP ${resp.status}：${syncErr.message}`);
+      console.warn(`[bmsync] <- ${method} ${url} HTTP ${resp.status}: ${syncErr.message}`);
     } catch {
-      // 日志失败不改变错误
+      // Logging must never change the error
     }
     throw syncErr;
   }
   try {
-    console.log(`[bmsync] ← ${method} ${url} HTTP ${resp.status} OK`);
+    console.log(`[bmsync] <- ${method} ${url} HTTP ${resp.status} OK`);
   } catch {
-    // 日志失败不影响返回
+    // Logging must not affect the return
   }
   return data;
 }
 
 function toSyncError(status, data) {
-  const msg = (data && data.message) || '';
+  const serverMsg = (data && data.message) || '';
   switch (status) {
     case 401:
-      return new SyncError(ERR_UNAUTHORIZED, '访问令牌无效，请在设置中检查', data);
+      return new SyncError(ERR_UNAUTHORIZED, 'Access token is invalid; check it on the settings page', data);
     case 403:
-      return new SyncError(ERR_NO_PERMISSION, '缺少访问该服务器的权限', data);
+      return new SyncError(ERR_NO_PERMISSION, 'Missing permission to access this server', data);
     case 413:
       return new SyncError(
         ERR_SERVER,
-        '书签数据超过服务端限制。若使用了 Nginx Proxy Manager，请在 Advanced 面板' +
-          '加入 client_max_body_size 32m;',
+        'Bookmark data exceeds the server limit. With Nginx Proxy Manager, add' +
+          ' client_max_body_size 32m; in the Advanced panel',
         data,
       );
     case 429:
-      return new SyncError(ERR_RATE_LIMITED, '请求过于频繁，请稍后再试', data);
+      return new SyncError(ERR_RATE_LIMITED, 'Too many requests; try again later', data);
     case 400:
     case 422:
-      return new SyncError(ERR_SERVER, `服务端拒绝了这次同步：${msg}`, data);
+      return new SyncError(ERR_SERVER, `Server rejected this sync: ${serverMsg}`, data);
     default:
-      return new SyncError(ERR_SERVER, `服务端返回 HTTP ${status}${msg ? '：' + msg : ''}`, data);
+      return new SyncError(ERR_SERVER, `Server returned HTTP ${status}${serverMsg ? ': ' + serverMsg : ''}`, data);
   }
 }
 
-/** 连通性检查。不需要 token —— /api/health 是公开的。 */
+/** Connectivity check. No token needed — /api/health is public. */
 export async function healthCheck(serverUrl) {
   const base = normalizeBaseUrl(serverUrl);
-  if (!base) throw new SyncError(ERR_NO_SETTINGS, '服务器地址无效');
+  if (!base) throw new SyncError(ERR_NO_SETTINGS, 'Server URL is invalid');
   return request(`${base}/health`, { method: 'GET' });
 }
 
-/** 上报 state 并取回合并后的权威 state。 */
+/** Upload state and fetch back the merged authoritative state. */
 export async function sync({ serverUrl, token, device, state, base }) {
   const url = normalizeBaseUrl(serverUrl);
-  if (!url) throw new SyncError(ERR_NO_SETTINGS, '尚未配置服务器地址，请先在设置中填写');
-  if (!token) throw new SyncError(ERR_NO_SETTINGS, '尚未配置访问令牌');
+  if (!url) throw new SyncError(ERR_NO_SETTINGS, 'Server URL is not configured yet; fill it in on the settings page first');
+  if (!token) throw new SyncError(ERR_NO_SETTINGS, 'Access token is not configured yet');
 
   const data = await request(`${url}/sync`, {
     method: 'POST',
     token,
-    // 书签多时请求体可能几百 KB，超时要给得比普通请求宽裕
+    // Many bookmarks can mean hundreds of KB; allow a more generous timeout
     timeoutMs: 120_000,
     body: { device, state, base },
   });
@@ -220,34 +223,34 @@ export async function sync({ serverUrl, token, device, state, base }) {
   return data;
 }
 
-/** 读取冲突列表。 */
+/** Read the conflict list. */
 export async function fetchConflicts({ serverUrl, token, limit = 50 }) {
   const base = normalizeBaseUrl(serverUrl);
-  if (!base) throw new SyncError(ERR_NO_SETTINGS, '服务器地址无效');
+  if (!base) throw new SyncError(ERR_NO_SETTINGS, 'Server URL is invalid');
   return request(`${base}/conflicts?limit=${limit}`, { token });
 }
 
-/** 读取历史快照列表。 */
+/** Read the history snapshot list. */
 export async function fetchHistory({ serverUrl, token }) {
   const base = normalizeBaseUrl(serverUrl);
-  if (!base) throw new SyncError(ERR_NO_SETTINGS, '服务器地址无效');
+  if (!base) throw new SyncError(ERR_NO_SETTINGS, 'Server URL is invalid');
   return request(`${base}/history`, { token });
 }
 
 /**
- * 检测本地时钟是否明显异常。
+ * Detect a badly skewed local clock.
  *
- * HLC 保证了因果性，所以时钟偏差本身不会导致丢数据。但若本地时钟被大幅
- * 调快（误设为 2035 年之类），它产生的时间戳会压制其他所有设备的改动，
- * 且**不会自愈**。这里给一个提示，让用户有机会去改回来。
- * 见 design.md §12.4。
+ * HLC preserves causality, so skew alone never loses data. But if the local
+ * clock jumps far into the future (mistakenly set to 2035, say), its stamps
+ * suppress every other device's edits and **never self-heal**. Warn so the
+ * user can fix it. See docs/architecture.md §11.
  */
 export function clockWarning(localNow, serverTime) {
   if (!serverTime) return null;
   const diffDays = Math.abs(localNow - serverTime) / 86_400_000;
   if (diffDays > 365) {
-    return `本地系统时间与服务器相差约 ${Math.round(diffDays)} 天。` +
-      '这不会导致丢数据，但本机新产生的时间戳会长期压制其他设备的改动。建议校正系统时间。';
+    return `Local system time differs from the server by about ${Math.round(diffDays)} days.` +
+      ' No data will be lost, but stamps from this machine will keep overriding other devices. Please correct the system time.';
   }
   return null;
 }

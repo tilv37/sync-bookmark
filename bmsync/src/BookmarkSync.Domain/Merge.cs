@@ -1,33 +1,34 @@
 namespace BookmarkSync.Domain;
 
-/// <summary>冲突类型。</summary>
+/// <summary>Conflict kinds.</summary>
 public static class ConflictReasons
 {
     /// <summary>
-    /// 真正的并发编辑：两端都基于同一个基线改动了同一项。
-    /// <b>这才是有价值的冲突</b>，用户需要知道。
+    /// Genuine concurrent edit: both sides changed the same item from the same baseline.
+    /// <b>This is the valuable conflict</b> worth surfacing to the user.
     /// </summary>
     public const string ConcurrentEdit = "concurrent_edit";
 
     /// <summary>
-    /// HLC 完全相等但内容不同。
+    /// HLC timestamps fully equal but content differs.
     /// </summary>
     /// <remarks>
-    /// 理论上不应发生 —— HLC 保证同一因果链上严格递增，每台设备在同一
-    /// 毫秒内用逻辑计数区分。走到这里说明两端 HLC 实现不一致，
-    /// 记录下来是为了排查，不是预期会有。
+    /// Should not happen in theory — HLC is strictly increasing per causal chain,
+    /// with the logical counter separating same-millis events. Reaching here
+    /// suggests divergent HLC implementations; it is logged for diagnosis,
+    /// not expected.
     /// </remarks>
     public const string HlcCollision = "hlc_collision";
 }
 
-/// <summary>决胜方标识。</summary>
+/// <summary>Winning side marker.</summary>
 public static class ConflictWinners
 {
     public const string Server = "server";
     public const string Client = "client";
 }
 
-/// <summary>一条冲突记录。纯观测，<b>不影响合并结果</b>。</summary>
+/// <summary>A single conflict record. Pure observation, <b>does not affect the merge outcome</b>.</summary>
 public sealed record Conflict
 {
     [System.Text.Json.Serialization.JsonPropertyName("at")]
@@ -81,7 +82,7 @@ public sealed record Conflict
     public string? Url { get; init; }
 }
 
-/// <summary>一次合并的结果统计。</summary>
+/// <summary>Merge result statistics.</summary>
 public sealed record Summary
 {
     [System.Text.Json.Serialization.JsonPropertyName("created")]
@@ -101,7 +102,7 @@ public sealed record Summary
     public int Unchanged { get; init; }
 }
 
-/// <summary>一次合并的全部产出。</summary>
+/// <summary>Full output of one merge.</summary>
 public sealed class MergeResult
 {
     public required State State { get; init; }
@@ -112,49 +113,52 @@ public sealed class MergeResult
 }
 
 /// <summary>
-/// 合并算法：LWW-Element-Set（带墓碑的 LWW 集合）。
+/// Merge algorithm: LWW-Element-Set (LWW set with tombstones).
 /// </summary>
 /// <remarks>
 /// <para>
-/// 合并是本项目风险最高的一段代码：它决定了两台设备最终是否会收敛到
-/// 同一个书签集合，而且出错时<b>静默丢数据、用户完全无感</b>。
+/// Merge is the highest-risk code in this project: it decides whether two
+/// devices converge to the same bookmark set, and a bug here causes
+/// <b>silent data loss the user never notices</b>.
 /// </para>
 /// <para>
-/// 因此这一文件的第一原则不是性能或简洁，而是：
+/// First principle of this file is therefore not performance or brevity, but:
 /// </para>
 /// <list type="number">
-/// <item>遍历顺序确定（走排序后的并集，不走字典遍历顺序）</item>
-/// <item>三个不变量有显式断言（见 <see cref="MergeInvariants"/>）</item>
-/// <item>每个分支都有对应的测试用例</item>
+/// <item>Deterministic traversal (sorted union, never dictionary order)</item>
+/// <item>Explicit assertions for the three invariants (see <see cref="MergeInvariants"/>)</item>
+/// <item>A test case for every branch</item>
 /// </list>
 /// <para>
-/// 这不是 CRDT。区别在于：CRDT 保证无冲突合并，这里允许冲突但用 HLC
-/// 时间戳决胜。对个人书签场景够用，且实现量只有 CRDT 的零头。
+/// This is not a CRDT: CRDTs merge conflict-free, while here conflicts are
+/// allowed and resolved by HLC timestamp. That is enough for personal
+/// bookmarks at a fraction of the implementation cost.
 /// </para>
 /// <para>
-/// identity（key）由内容哈希派生，不存任何元数据 —— 见 docs/design.md §3。
-/// 这意味着「改 URL」和「改文件夹名」都会表现为「删除旧的 + 新增新的」，
-/// 而非「修改」。这是刻意的取舍。
+/// Identity (key) is derived from a content hash with no stored metadata —
+/// see docs/architecture.md §2. Changing a URL or a folder name therefore appears
+/// as "delete old + add new", not "modify". This is a deliberate trade-off.
 /// </para>
 /// </remarks>
 public static class Merger
 {
     /// <summary>
-    /// 把客户端上报的状态与服务端已有的状态合并，返回合并后的权威状态。
+    /// Merges the client-reported state with the server state and returns the authoritative result.
     /// </summary>
-    /// <param name="server">服务端当前状态（本方法不会修改它）。</param>
-    /// <param name="incoming">客户端上报的状态（本方法不会修改它）。</param>
+    /// <param name="server">Current server state (never mutated).</param>
+    /// <param name="incoming">Client-reported state (never mutated).</param>
     /// <param name="base">
-    /// 客户端「上次见到」每个 key 时的 HLC 快照（key → m）。为空表示这是
-    /// 该客户端的首次同步。它的唯一用途是<b>区分「我改了」和「对面改了」</b> ——
-    /// 没有它，服务端每次合并都会把「刚合过的东西」记成冲突，日志迅速失去价值。
+    /// HLC snapshot of what the client "last saw" per key (key → m). Null/empty
+    /// means first sync from this client. Its only purpose is to distinguish
+    /// "I changed it" from "the other side changed it" — without it, every
+    /// merge would log just-merged content as conflicts and the log would lose value.
     /// </param>
-    /// <param name="device">上报方的设备标识，写进冲突记录便于排查。</param>
-    /// <param name="now">本次操作的墙钟毫秒，写进冲突记录。</param>
+    /// <param name="device">Reporting device id, recorded for diagnosis.</param>
+    /// <param name="now">Wall-clock millis for this operation, recorded on conflicts.</param>
     /// <remarks>
-    /// 关于"删除"：墓碑（d=true）就是一条普通 item，它的 M 参与 LWW 决胜。
-    /// 因此删除天然会传播到其他设备，不需要任何特殊通道 —— 这是选用
-    /// LWW-Element-Set 而非朴素"diff 同步"的核心原因。
+    /// On deletion: a tombstone (d=true) is an ordinary item whose M takes part
+    /// in LWW resolution. Deletion therefore propagates with no special channel —
+    /// the core reason for LWW-Element-Set over naive diff sync.
     /// </remarks>
     public static MergeResult Merge(
         State server,
@@ -168,13 +172,14 @@ public static class Merger
 
         var clock = Hlc.NewWithClock(() => now);
 
-        // 服务端先吸收客户端发来的所有时间戳，之后它产生的任何时间戳都会
-        // 严格大于它们。这是 HLC 的因果性保证，也是"服务端时间戳最权威"的原因。
+        // Absorb every incoming timestamp first, so any timestamp produced
+        // afterwards is strictly greater (HLC causality). This is why the
+        // server timestamp is authoritative.
         var stamps = new List<string>(incoming.Items.Count * 2);
-        foreach (Item it in incoming.Items.Values)
+        foreach (Item incomingItem in incoming.Items.Values)
         {
-            stamps.Add(it.M);
-            stamps.Add(it.A);
+            stamps.Add(incomingItem.M);
+            stamps.Add(incomingItem.A);
         }
 
         clock.ObserveMany(stamps);
@@ -184,43 +189,45 @@ public static class Merger
         var conflicts = new List<Conflict>(4);
         int created = 0, updated = 0, deleted = 0, unchanged = 0;
 
-        // 取两边 key 的并集后按字典序遍历，保证输出确定。
+        // Walk the sorted union of both key sets for deterministic output.
         foreach (string key in SortedUnionKeys(server, incoming))
         {
-            bool sOk = server.Items.TryGetValue(key, out Item s);
-            bool cOk = incoming.Items.TryGetValue(key, out Item c);
+            bool hasServer = server.Items.TryGetValue(key, out Item serverItem);
+            bool hasClient = incoming.Items.TryGetValue(key, out Item clientItem);
 
             Item winner;
-            if (!cOk)
+            if (!hasClient)
             {
-                winner = s; // 只有服务端有
+                winner = serverItem;
             }
-            else if (!sOk)
+            else if (!hasServer)
             {
-                winner = c; // 只有客户端有
+                winner = clientItem;
             }
-            else if (Hlc.Compare(c.M, s.M) > 0)
+            else if (Hlc.Compare(clientItem.M, serverItem.M) > 0)
             {
-                winner = c;
+                winner = clientItem;
             }
-            else if (Hlc.Compare(s.M, c.M) > 0)
+            else if (Hlc.Compare(serverItem.M, clientItem.M) > 0)
             {
-                winner = s;
+                winner = serverItem;
             }
             else
             {
-                // HLC 完全相等
-                if (SameContent(s, c))
+                // Equal HLC timestamps.
+                if (SameContent(serverItem, clientItem))
                 {
-                    // 同一毫秒内被两端各存了一次，但内容一模一样 —— 完全正常
-                    winner = s;
+                    // Stored once per side within the same millis with identical
+                    // content — normal, keep either side.
+                    winner = serverItem;
                 }
                 else
                 {
-                    // 走到这里说明两端 HLC 实现不一致。仍然要给出一个确定结果，
-                    // 否则每次同步结果都不同，最终必然分叉。按标题字典序兜底。
-                    (winner, Item loser) = LexicographicPick(s, c);
-                    string field = FirstDifferingField(s, c);
+                    // Indicates divergent HLC implementations. Still produce a
+                    // deterministic result (title ordinal fallback); otherwise
+                    // repeated syncs would fork.
+                    (winner, Item _) = LexicographicPick(serverItem, clientItem);
+                    string field = FirstDifferingField(serverItem, clientItem);
                     conflicts.Add(new Conflict
                     {
                         At = now,
@@ -228,45 +235,45 @@ public static class Merger
                         Key = key,
                         Reason = ConflictReasons.HlcCollision,
                         Field = field,
-                        Winner = WinnerSide(winner, s),
+                        Winner = WinnerSide(winner, serverItem),
                         Loser = device,
                         WinnerValue = FieldValue(winner, field),
-                        LoserValue = FieldValue(LoserOf(s, c, winner), field),
-                        Url = FirstNonEmpty(s.U, c.U),
+                        LoserValue = FieldValue(LoserOf(serverItem, clientItem, winner), field),
+                        Url = FirstNonEmpty(serverItem.U, clientItem.U),
                     });
-                    _ = loser;
                 }
             }
 
             result.Items[key] = winner;
 
-            // ── 统计 ─────────────────────────────────────────────────────
-            if (!sOk)
+            // Stats from the server perspective.
+            if (!hasServer)
             {
-                created++; // 服务端没有 → 本次新增
+                created++;
             }
-            else if (s == winner)
+            else if (serverItem == winner)
             {
-                unchanged++; // Item 是值类型，== 即全字段相等
+                // Item is a value type: == means field-wise equality.
+                unchanged++;
             }
-            else if (winner.D && !s.D)
+            else if (winner.D && !serverItem.D)
             {
-                deleted++; // 存活 → 墓碑
+                deleted++;
             }
             else
             {
                 updated++;
             }
 
-            // ── 三方冲突检测（纯观测，不改变上面已定的 winner）─────────────
-            if (sOk && cOk && !SameContent(s, c)
-                && @base is not null && @base.TryGetValue(key, out string? bm))
+            // Three-way conflict detection (observation only; winner is fixed).
+            if (hasServer && hasClient && !SameContent(serverItem, clientItem)
+                && @base is not null && @base.TryGetValue(key, out string? baseHlc))
             {
-                bool clientChanged = Hlc.Compare(c.M, bm) > 0;
-                bool serverChanged = Hlc.Compare(s.M, bm) > 0;
+                bool clientChanged = Hlc.Compare(clientItem.M, baseHlc) > 0;
+                bool serverChanged = Hlc.Compare(serverItem.M, baseHlc) > 0;
                 if (clientChanged && serverChanged)
                 {
-                    string field = FirstDifferingField(s, c);
+                    string field = FirstDifferingField(serverItem, clientItem);
                     conflicts.Add(new Conflict
                     {
                         At = now,
@@ -274,11 +281,11 @@ public static class Merger
                         Key = key,
                         Reason = ConflictReasons.ConcurrentEdit,
                         Field = field,
-                        Winner = WinnerSide(winner, s),
-                        Loser = LoserSide(winner, s, device),
+                        Winner = WinnerSide(winner, serverItem),
+                        Loser = LoserSide(winner, serverItem, device),
                         WinnerValue = FieldValue(winner, field),
-                        LoserValue = FieldValue(LoserOf(s, c, winner), field),
-                        Url = FirstNonEmpty(s.U, c.U),
+                        LoserValue = FieldValue(LoserOf(serverItem, clientItem, winner), field),
+                        Url = FirstNonEmpty(serverItem.U, clientItem.U),
                     });
                 }
             }
@@ -287,14 +294,10 @@ public static class Merger
         string? invariantError = MergeInvariants(server, incoming, result);
         if (invariantError is not null)
         {
-            // 不变量被打破说明 Merge 本身有 bug。这是程序错误而非用户错误，
-            // 绝不能把一份可能损坏的权威状态返回给客户端 —— 宁可让这次同步失败。
-            //
-            // 移植说明：Go 版在这里 panic。C# 不该用异常表达"代码有 bug"——
-            // 异常会被 store 层 catch 成"同步失败"的 500，把一个编程错误
-            // 伪装成运行时故障，排查时会去查数据和网络而不是查代码。
-            // 这里直接抛 InvalidOperationException，让它以"崩溃"的形式暴露。
-            throw new InvalidOperationException("bmsync: 合并不变量被打破: " + invariantError);
+            // A broken invariant means a bug in Merge itself (programmer error,
+            // not user error). Never return a possibly corrupt authoritative
+            // state — fail this sync instead via InvalidOperationException.
+            throw new InvalidOperationException("bmsync: merge invariant violated: " + invariantError);
         }
 
         return new MergeResult
@@ -311,68 +314,69 @@ public static class Merger
         };
     }
 
-    /// <summary>校验三条必须在任何输入下都成立的不变量。</summary>
-    /// <returns>非 null 表示某条被打破，值是原因。任何一条被打破都意味着 Merge 里有 bug，而不是用户数据有问题。</returns>
+    /// <summary>Validates the three invariants that must hold for any input.</summary>
+    /// <returns>Non-null means a violation with the reason. Any violation means a bug in Merge, not bad user data.</returns>
     public static string? MergeInvariants(State server, State incoming, State result)
     {
-        // 1. 结果的 key 集合必须恰好等于两边 key 集合的并集：既不能多，
-        //    也不能少。多意味着凭空造出第三种数据，少意味着书签凭空消失。
+        // 1. Result keys must equal exactly the union of both sides: no more,
+        //    no fewer. Extra means invented data; missing means lost bookmarks.
         var union = new HashSet<string>(StringComparer.Ordinal);
-        foreach (string k in server.Items.Keys)
+        foreach (string key in server.Items.Keys)
         {
-            union.Add(k);
+            union.Add(key);
         }
 
-        foreach (string k in incoming.Items.Keys)
+        foreach (string key in incoming.Items.Keys)
         {
-            union.Add(k);
+            union.Add(key);
         }
 
         if (union.Count != result.Items.Count)
         {
-            return $"结果 item 数 {result.Items.Count} != 两边并集 {union.Count}";
+            return $"result item count {result.Items.Count} != union {union.Count}";
         }
 
-        foreach (string k in result.Items.Keys)
+        foreach (string key in result.Items.Keys)
         {
-            if (!union.Contains(k))
+            if (!union.Contains(key))
             {
-                return $"结果出现不属于任何一边的 key {k}";
+                return $"result contains foreign key {key}";
             }
         }
 
-        foreach (string k in union)
+        foreach (string key in union)
         {
-            if (!result.Items.ContainsKey(k))
+            if (!result.Items.ContainsKey(key))
             {
-                return $"结果缺少 key {k}";
+                return $"result missing key {key}";
             }
         }
 
-        // 2. 删除只能通过墓碑表达。服务端有的 key 绝不能从结果中消失 ——
-        //    这是"合并绝不会静默丢书签"这条承诺的直接体现。
-        foreach ((string k, Item s) in server.Items)
+        // 2. Deletion is expressed only via tombstones. A server key must never
+        //    vanish from the result — the "merge never silently drops bookmarks" promise.
+        foreach ((string key, Item serverItem) in server.Items)
         {
-            if (!result.Items.TryGetValue(k, out Item r))
+            if (!result.Items.TryGetValue(key, out Item merged))
             {
-                return $"服务端 item {k} 从结果中消失";
+                return $"server item {key} vanished from result";
             }
 
-            if (!s.D && r.D && r.M == s.M)
+            if (!serverItem.D && merged.D && merged.M == serverItem.M)
             {
-                return $"item {k} 在时间戳未变的情况下被判为已删除";
+                return $"item {key} marked deleted without timestamp change";
             }
         }
 
-        // 3. 服务端与入参都不得被就地修改 —— 幂等性依赖于此。
-        //    这里只做轻量抽样校验，完整的"重复 Merge 结果不变"由测试保证。
+        // 3. Neither input may be mutated in place — idempotency depends on it.
+        //    Only a light check here; full "merge twice is stable" is covered by tests.
         return null;
     }
 
-    /// <summary>返回 server 与 incoming 的 key 并集，按字典序升序。</summary>
+    /// <summary>Returns the key union of server and incoming, ascending ordinal.</summary>
     /// <remarks>
-    /// 排序不是为了"好看"：若某处依赖"先处理哪个 key"来记账或决胜，
-    /// 同样的输入会产出不同的输出。确定性在这里是可复现调试的前提。
+    /// Sorting is not cosmetic: if any accounting or tie-break depended on
+    /// processing order, identical input would yield different output.
+    /// Determinism is the precondition for reproducible debugging.
     /// </remarks>
     public static string[] SortedUnionKeys(State server, State incoming)
     {
@@ -399,21 +403,22 @@ public static class Merger
         return output.ToArray();
     }
 
-    /// <summary>判断两个 item 的<b>内容</b>是否相同。</summary>
+    /// <summary>Returns true when two items have equal <b>content</b>.</summary>
     /// <remarks>
-    /// 关键：只比较 (P, T, N, U)，不比较 M / A / D / X。M 是时间戳而不是
-    /// 内容 —— 同一个书签在两台机器上若被各自重新保存一次，M 会不同但内容
-    /// 完全一样，不应该被当成冲突。
+    /// Compares only (P, T, N, U); M / A / D / X are excluded. M is a timestamp,
+    /// not content — the same bookmark re-saved on two machines gets different M
+    /// with identical content and must not count as a conflict.
     /// </remarks>
     public static bool SameContent(Item a, Item b) =>
         a.P == b.P && a.T == b.T && a.N == b.N && a.U == b.U;
 
-    // ── 冲突记录的字段级 diff ─────────────────────────────────────────────
+    // Field-level diff for conflict records.
 
-    /// <summary>按固定顺序列出参与内容比较的字段。</summary>
+    /// <summary>Content fields in fixed order.</summary>
     /// <remarks>
-    /// 固定顺序保证 <see cref="FirstDifferingField"/> 在多项同时不同时总是返回
-    /// 同一个字段，否则同一对冲突在不同同步轮次里会记录不同的字段。
+    /// Fixed order keeps <see cref="FirstDifferingField"/> stable when several
+    /// fields differ at once; otherwise the same conflict would log different
+    /// fields across sync rounds.
     /// </remarks>
     private static readonly (string Label, string Field)[] ContentFields =
     {
@@ -423,11 +428,11 @@ public static class Merger
         ("url", nameof(Item.U)),
     };
 
-    private static string FirstDifferingField(Item s, Item c)
+    private static string FirstDifferingField(Item serverItem, Item clientItem)
     {
         foreach ((string label, string field) in ContentFields)
         {
-            if (ValueOf(s, field) != ValueOf(c, field))
+            if (ValueOf(serverItem, field) != ValueOf(clientItem, field))
             {
                 return label;
             }
@@ -436,48 +441,48 @@ public static class Merger
         return string.Empty;
     }
 
-    private static string ValueOf(Item it, string field) => field switch
+    private static string ValueOf(Item item, string field) => field switch
     {
-        nameof(Item.P) => it.P ?? string.Empty,
-        nameof(Item.T) => it.T ?? string.Empty,
-        nameof(Item.N) => it.N ?? string.Empty,
-        nameof(Item.U) => it.U ?? string.Empty,
+        nameof(Item.P) => item.P ?? string.Empty,
+        nameof(Item.T) => item.T ?? string.Empty,
+        nameof(Item.N) => item.N ?? string.Empty,
+        nameof(Item.U) => item.U ?? string.Empty,
         _ => string.Empty,
     };
 
-    private static string FieldValue(Item it, string label)
+    private static string FieldValue(Item item, string label)
     {
-        foreach ((string lbl, string field) in ContentFields)
+        foreach ((string entryLabel, string field) in ContentFields)
         {
-            if (lbl == label)
+            if (entryLabel == label)
             {
-                return ValueOf(it, field);
+                return ValueOf(item, field);
             }
         }
 
         return string.Empty;
     }
 
-    private static string FirstNonEmpty(string? a, string? b) =>
-        !string.IsNullOrEmpty(a) ? a : b ?? string.Empty;
+    private static string FirstNonEmpty(string? first, string? second) =>
+        !string.IsNullOrEmpty(first) ? first : second ?? string.Empty;
 
-    /// <summary>在 HLC 碰撞时给出确定决胜：标题字典序小者获胜。</summary>
-    /// <remarks>纯粹为了确定性，不含任何"哪个更好"的语义。</remarks>
-    private static (Item Winner, Item Loser) LexicographicPick(Item s, Item c) =>
-        string.CompareOrdinal(s.N ?? string.Empty, c.N ?? string.Empty) <= 0
-            ? (s, c)
-            : (c, s);
+    /// <summary>Deterministic HLC-collision fallback: smaller title wins.</summary>
+    /// <remarks>Pure determinism, no "which is better" semantics.</remarks>
+    private static (Item Winner, Item Loser) LexicographicPick(Item serverItem, Item clientItem) =>
+        string.CompareOrdinal(serverItem.N ?? string.Empty, clientItem.N ?? string.Empty) <= 0
+            ? (serverItem, clientItem)
+            : (clientItem, serverItem);
 
-    /// <summary>判断 winner 来自服务端还是客户端。</summary>
-    /// <remarks>调用前提：s 与 c 不全字段相等（否则无法区分来源）。</remarks>
-    private static string WinnerSide(Item winner, Item server) =>
-        winner == server ? ConflictWinners.Server : ConflictWinners.Client;
+    /// <summary>Returns whether the winner came from server or client.</summary>
+    /// <remarks>Precondition: the two inputs are not field-wise equal (otherwise the source is ambiguous).</remarks>
+    private static string WinnerSide(Item winner, Item serverItem) =>
+        winner == serverItem ? ConflictWinners.Server : ConflictWinners.Client;
 
-    /// <summary>返回败方标识：服务端赢 → 败方是客户端设备；反之是服务端。</summary>
-    private static string LoserSide(Item winner, Item server, string device) =>
-        winner == server ? device : ConflictWinners.Server;
+    /// <summary>Returns the loser marker: server win means the client device lost, and vice versa.</summary>
+    private static string LoserSide(Item winner, Item serverItem, string device) =>
+        winner == serverItem ? device : ConflictWinners.Server;
 
-    /// <summary>返回 s、c 中不是 winner 的那一个。</summary>
-    private static Item LoserOf(Item s, Item c, Item winner) =>
-        winner == s ? c : s;
+    /// <summary>Returns whichever of the two inputs is not the winner.</summary>
+    private static Item LoserOf(Item serverItem, Item clientItem, Item winner) =>
+        winner == serverItem ? clientItem : serverItem;
 }

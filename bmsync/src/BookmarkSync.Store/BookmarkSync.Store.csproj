@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    持久化层：state.json 的原子读写、互斥串行化、历史快照、冲突缓冲。
+    Persistence layer: atomic state.json read/write, mutex serialization, history snapshots, conflict buffer.
 
-    依赖方向：只向下依赖 Domain，不认识 HTTP。反向依赖过一次（原来的 Go
-    实现让 store 引用了 server.Config），代价是"持久化层需要知道 Token
-    和监听地址"这种荒唐的事。这里用 StoreOptions 挡住它再次发生。
+    Dependency direction: depends only downward on Domain, knows nothing about HTTP. A reverse dependency happened once (the original Go
+    implementation had store referencing server.Config), whose cost was the absurdity that "the persistence layer needs to know the token
+    and listen address". StoreOptions exists to stop that from happening again.
   -->
 
   <PropertyGroup>

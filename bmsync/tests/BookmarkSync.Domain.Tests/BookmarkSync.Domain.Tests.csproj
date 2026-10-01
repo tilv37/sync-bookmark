@@ -1,11 +1,11 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    领域层单元测试。
+    Domain-layer unit tests.
 
-    用例在服务端从 Go 迁移到 .NET 10 时逐条移植，数量（约 60 个）与原
-    Go 侧保持一致是有意的：如果少了一些，差额往往意味着某个边界在
-    移植时被"顺手简化"了，而那正是最容易悄悄改变行为的地方。
+    Cases were ported one by one when the server migrated from Go to .NET 10; keeping the count (~60) aligned with the
+    Go side is intentional: any shortfall usually means some edge case was "simplified away" during
+    porting, and that is exactly where behavior changes sneak in unnoticed.
   -->
 
   <PropertyGroup>

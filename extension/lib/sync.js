@@ -1,26 +1,26 @@
-// extension/lib/sync.js —— 同步编排
+// extension/lib/sync.js — sync orchestration
 //
-// 把 collect / client / apply / store 串成一次完整的同步。
+// Wires collect / client / apply / store into one full sync.
 //
-// ── 流程 ──────────────────────────────────────────────────────────────
+// ── Flow ────────────────────────────────────────────────────────────────
+//  1. Read the cached state (baseline)
+//  2. Scan the local bookmark tree -> nodes
+//  3. Diff against the baseline, build the state + base to upload (fresh HLC for changed items)
+//  4. POST /api/sync
+//  5. Calibrate the local clock with the returned hlc
+//  6. Diff the returned authoritative state against step 3, plan the apply
+//  7. Execute the plan against the Firefox bookmark tree
+//  8. Replace the cache with the returned state wholesale
 //
-//	1. 读缓存 state（基线）
-//	2. 扫描本地书签树 → nodes
-//	3. 对比基线，构造待上报的 state + base（给变化的项打新 HLC）
-//	4. POST /api/sync
-//	5. 用返回的 hlc 校准本地时钟
-//	6. 对比返回的权威 state 与第 3 步的结果，算出应用计划
-//	7. 执行计划，修改 Firefox 书签树
-//	8. 缓存被返回的 state 完整替换
+// ── Failure handling (docs/architecture.md §4) ─────────────────────────────────
+//  · collect fails       → no request, local untouched
+//  · network / non-200   → **never touch local bookmarks**, keep the cache
+//  · apply fails midway  → no rollback, report "partial, retry suggested" (retry is idempotent)
 //
-// ── 失败处理（design.md §9.6）────────────────────────────────────────
-//
-//	· 采集失败          → 不发请求，不动本地
-//	· 网络/非 200      → **绝不动本地书签**，保留缓存
-//	· 应用阶段中途失败  → 不回滚，提示"部分完成，建议重试"（重试是幂等的）
-//
-// 为什么不做应用阶段回滚：Firefox 书签树没有事务，反向回滚每一步的复杂度
-// 远超收益；且 LWW 合并的方向性保证"重试只会更接近正确状态，不会造成破坏"。
+// Why no apply-phase rollback: the Firefox bookmark tree has no
+// transactions; reverse-rolling every step costs far more than it saves, and
+// LWW merge directionality guarantees "retry only gets closer to the correct
+// state, never destroys".
 
 import { HLC } from './hlc.js';
 import { scan, buildState, SCHEMA_VERSION } from './collect.js';
@@ -28,51 +28,51 @@ import { planApply, executePlan } from './apply.js';
 import { loadState, saveState, loadSettings, ensureDeviceId } from './store.js';
 import { sync as httpSync, hasHostPermission, clockWarning, normalizeBaseUrl } from './client.js';
 
-/** 生成一个设备标识。 */
+/** Generate a device id. */
 function randomDeviceId() {
   const bytes = new Uint8Array(8);
   crypto.getRandomValues(bytes);
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 /**
- * 执行一次完整同步。
+ * Run one full sync.
  *
- * @param {object} api browser.bookmarks 的替身
+ * @param {object} api browser.bookmarks stand-in
  * @param {object} [opts]
- * @param {(phase: string) => void} [opts.onPhase] 阶段回调，用于更新 UI
- * @param {typeof fetch} [opts.fetchImpl] 注入 fetch，便于测试
- * @returns {Promise<object>} 同步结果摘要
+ * @param {(phase: string) => void} [opts.onPhase] Phase callback for UI updates
+ * @param {typeof fetch} [opts.fetchImpl] Injected fetch, for tests
+ * @returns {Promise<object>} Sync result summary
  */
 export async function runSync(api, opts = {}) {
   const { onPhase } = opts;
   const settings = await loadSettings();
 
   if (!normalizeBaseUrl(settings.serverUrl)) {
-    throw new Error('尚未配置服务器地址，请先在设置中填写');
+    throw new Error('Server URL is not configured yet; fill it in on the settings page first');
   }
   if (!settings.token) {
-    throw new Error('尚未配置访问令牌，请先在设置中填写');
+    throw new Error('Access token is not configured yet; fill it in on the settings page first');
   }
 
-  // Firefox MV3 需要用户手动授予 host 权限（design.md §9.3）。
-  // 权限申请必须在 popup / options 的 click 手势里完成，这里只做检查：
-  // background 的 onMessage 已无手势，调 request() 会直接抛错。
+  // Firefox MV3 requires the user to grant host permission manually (docs/architecture.md §7).
+  // Permission must be requested in a popup/options click gesture; here we only check:
+  // background onMessage has lost the gesture, and request() there throws.
   const granted = await hasHostPermission(settings.serverUrl);
   if (!granted) {
-    throw new Error(`未获得访问 ${settings.serverUrl} 的权限，请先在设置页点「测试连接」并在弹窗中允许后重试`);
+    throw new Error(`No permission to access ${settings.serverUrl}; click "Test connection" on the settings page and allow it, then retry`);
   }
 
   onPhase?.('scanning');
 
-  // ── 1–3. 采集 ────────────────────────────────────────────────
+  // ── 1-3. Collect ──────────────────────────────────────────────
   const cached = await loadState();
   const scanResult = await scan(api, {
     enabledRoots: new Set(settings.enabledRoots || []),
     includeMobile: Boolean(settings.includeMobile),
   });
 
-  // 用缓存里的最大 m 校准时钟，保证新打的时间戳大于所有历史记录
+  // Calibrate the clock with the largest cached m, so fresh stamps exceed all history
   const clock = new HLC();
   clock.observeMany(allStamps(cached));
   if (cached.hlc) clock.update(cached.hlc);
@@ -82,9 +82,10 @@ export async function runSync(api, opts = {}) {
 
   onPhase?.('uploading');
 
-  // ── 4. 上报 ──────────────────────────────────────────────────
-  // 调试日志只打到本机控制台（含标题/URL，明码），排查完可无视；
-  // 不要把控制台内容贴到公开地方。
+  // ── 4. Upload ─────────────────────────────────────────────────
+  // Debug logs go to the local console only (they include titles/URLs in
+  // cleartext); safe to ignore after debugging. Never paste console output
+  // anywhere public.
   logOutgoingDiagnostics(outgoing);
   const deviceId = await ensureDeviceId(randomDeviceId);
   let response;
@@ -101,31 +102,32 @@ export async function runSync(api, opts = {}) {
   }
 
   if (!response || response.state?.v !== SCHEMA_VERSION) {
-    throw new Error('服务端返回了无法识别的数据格式，请确认扩展与服务端版本配套');
+    throw new Error('Server returned an unrecognized data format; make sure the extension and server versions match');
   }
 
-  // ── 5. 校时 ──────────────────────────────────────────────────
-  // 服务端 hlc 是它见过的最大时间戳。吸收它之后，本机之后产生的任何
-  // 时间戳都一定大于两台设备历史上的全部记录 —— 因果性由此保证。
+  // ── 5. Calibrate ──────────────────────────────────────────────
+  // The server hlc is the largest stamp it has seen. Absorbing it makes every
+  // later local stamp exceed the full history of both devices — that is what
+  // guarantees causality.
   if (response.hlc) clock.update(response.hlc);
 
   const clockWarningText = clockWarning(nowMs, response.serverTime);
 
-  // ── 6–7. 应用 ────────────────────────────────────────────────
+  // ── 6-7. Apply ────────────────────────────────────────────────
   onPhase?.('applying');
 
-  // 重扫一次：应用计划需要当前的实际状态（ffId 只有 scan() 能给出）
+  // Re-scan: the apply plan needs the current live state (only scan() yields Firefox ids)
   const freshScan = await scan(api, {
     enabledRoots: new Set(settings.enabledRoots || []),
     includeMobile: Boolean(settings.includeMobile),
   });
 
-  const plan = planApply(freshScan.nodes, response.state, freshScan.ffKeyToId);
+  const plan = planApply(freshScan.nodes, response.state, freshScan.firefoxIdBySyncKey);
   const applied = await executePlan(api, plan, {
     onProgress: (msg) => onPhase?.(msg),
   });
 
-  // ── 8. 完整替换缓存 ──────────────────────────────────────────
+  // ── 8. Replace the cache wholesale ────────────────────────────
   await saveState(response.state);
 
   const result = {
@@ -135,14 +137,14 @@ export async function runSync(api, opts = {}) {
     server: response.summary,
     conflicts: response.conflicts || [],
     applied,
-    warnings: [...scanResult.warnings, ...plan.skipped.map((s) => `跳过 ${s.reason}: ${s.key}`)],
+    warnings: [...scanResult.warnings, ...plan.skipped.map((skipped) => `Skipped ${skipped.reason}: ${skipped.key}`)],
     clockWarning: clockWarningText,
     serverTime: response.serverTime,
   };
 
   if (applied.failed.length > 0) {
-    // 不抛错：书签树没有事务，部分完成是既有事实。UI 需要显示"部分完成"，
-    // 让用户知道重试是安全的。
+    // Do not throw: without transactions, partial completion is a fact. The
+    // UI must show "partial" so users know retrying is safe.
     result.partial = true;
   }
   return result;
@@ -157,18 +159,19 @@ function allStamps(state) {
   return out;
 }
 
-/** UTF-8 字节数（与 Go 端 len() 口径一致；JS 的 .length 是 UTF-16 单元）。 */
-function utf8len(s) {
+/** UTF-8 byte length (same as C# length semantics; JS .length counts UTF-16 units). */
+function utf8len(text) {
   try {
-    return new TextEncoder().encode(s || '').length;
+    return new TextEncoder().encode(text || '').length;
   } catch {
-    return String(s || '').length;
+    return String(text || '').length;
   }
 }
 
 /**
- * 上报前打一遍待发送内容的摘要：项数、payload 字节、标题最长的 5 条。
- * 定位"服务端拒绝同步：标题/URL超长"时直接看这份日志即可。
+ * Log a summary of the outgoing payload before upload: item count, payload
+ * bytes, 5 longest titles. When the server rejects sync for "title/URL too
+ * long", this log pinpoints it.
  */
 function logOutgoingDiagnostics(outgoing) {
   try {
@@ -181,47 +184,48 @@ function logOutgoingDiagnostics(outgoing) {
       bytes = -1;
     }
     console.log(
-      `[bmsync] 上报 state：${keys.length} 项，base ${Object.keys(outgoing?.base || {}).length} 个，` +
-        `state JSON 约 ${bytes} 字节，本地统计 ${JSON.stringify(outgoing?.stats || {})}`,
+      `[bmsync] Uploading state: ${keys.length} items, ${Object.keys(outgoing?.base || {}).length} base entries, ` +
+        `state JSON ~${bytes} bytes, local stats ${JSON.stringify(outgoing?.stats || {})}`,
     );
     const ranked = keys
-      .map((k) => ({ k, n: utf8len(items[k]?.n), u: utf8len(items[k]?.u), t: items[k]?.t }))
-      .sort((a, b) => b.n - a.n)
+      .map((key) => ({ key, titleLen: utf8len(items[key]?.n), urlLen: utf8len(items[key]?.u), type: items[key]?.t }))
+      .sort((left, right) => right.titleLen - left.titleLen)
       .slice(0, 5);
-    for (const r of ranked) {
-      const it = items[r.k];
+    for (const row of ranked) {
+      const item = items[row.key];
       console.log(
-        `[bmsync] 标题最长 top5：key=${r.k} type=${r.t} 标题${r.n}字节 url${r.u}字节` +
-          ` 标题预览=${JSON.stringify(String(it?.n || '').slice(0, 120))}` +
-          ` url预览=${JSON.stringify(String(it?.u || '').slice(0, 120))}`,
+        `[bmsync] Longest titles top5: key=${row.key} type=${row.type} title=${row.titleLen}B url=${row.urlLen}B` +
+          ` titlePreview=${JSON.stringify(String(item?.n || '').slice(0, 120))}` +
+          ` urlPreview=${JSON.stringify(String(item?.u || '').slice(0, 120))}`,
       );
     }
   } catch (err) {
-    console.log(`[bmsync] 诊断日志生成失败（不影响同步）：${err?.message || err}`);
+    console.log(`[bmsync] Diagnostic log failed (sync unaffected): ${err?.message || err}`);
   }
 }
 
 /**
- * 服务端校验失败时，把报错里那个 32 位 key 对应的本地 item 翻出来：
- * 控制台打完整条目，抛给 UI 的信息里追加标题预览（截断 200 字）。
- * 找不到 key 时原样返回。
+ * On a server validation failure, look up the local item behind the 32-hex
+ * key in the error: log the full entry to the console and append a title
+ * preview (truncated to 200 chars) to the UI-facing message. Pass through
+ * unchanged when the key is not found.
  */
 function augmentValidationError(err, outgoing) {
   try {
     const msg = err?.message || '';
-    const m = String(msg).match(/[0-9a-f]{32}/);
-    if (!m) return err;
-    const item = outgoing?.state?.items?.[m[0]];
+    const match = String(msg).match(/[0-9a-f]{32}/);
+    if (!match) return err;
+    const item = outgoing?.state?.items?.[match[0]];
     if (!item) return err;
     console.error(
-      `[bmsync] 被服务端拒绝的条目：key=${m[0]} type=${item.t} parent=${item.p} ` +
-        `标题${utf8len(item.n)}字节 url${utf8len(item.u)}字节 ` +
-        `标题全文=${JSON.stringify(item.n)} url=${JSON.stringify(item.u)}`,
+      `[bmsync] Rejected entry: key=${match[0]} type=${item.t} parent=${item.p} ` +
+        `title=${utf8len(item.n)}B url=${utf8len(item.u)}B ` +
+        `fullTitle=${JSON.stringify(item.n)} url=${JSON.stringify(item.u)}`,
     );
     err.message =
-      `${msg}（本地标题预览：${JSON.stringify(String(item.n || '').slice(0, 200))}）`;
+      `${msg} (local title preview: ${JSON.stringify(String(item.n || '').slice(0, 200))})`;
   } catch {
-    // 日志增强失败不改变原错误
+    // Log enrichment must never change the original error
   }
   return err;
 }

@@ -6,16 +6,16 @@ using BookmarkSync.Server;
 namespace BookmarkSync.Server.Tests;
 
 /// <summary>
-/// 配置解析测试，对应 配置解析的测试用例（同上）。
+/// Config-parsing tests, mirroring the config-parsing test cases.
 /// </summary>
 /// <remarks>
-/// 所有设置都来自环境变量，便于容器化部署。测试传字典而不是改
-/// <see cref="Environment"/>：真实环境变量是进程级的并行测试里会互相污染，
-/// 而"哪个用例污染了哪个"是种特别难查的偶发失败。
+/// All settings come from env vars for containerized deploys. Tests pass dictionaries instead of
+/// mutating <see cref="Environment"/>: real env vars are process-wide and parallel tests would
+/// pollute each other — "which case polluted which" is a particularly nasty flake.
 /// </remarks>
 public class ServerOptionsTests
 {
-    /// <summary>构造一份环境变量字典，null 值表示"未设置"。</summary>
+    /// <summary>Build an env-var dictionary; null values mean "unset".</summary>
     private static Dictionary<string, string?> Env(params (string Key, string? Value)[] kv)
     {
         var d = new Dictionary<string, string?>(StringComparer.Ordinal) { ["BMSYNC_TOKEN"] = new string('t', 40) };
@@ -28,7 +28,7 @@ public class ServerOptionsTests
     }
 
     [Fact]
-    public void 默认值()
+    public void DefaultValues()
     {
         ServerOptions cfg = ServerOptions.Load(Env());
 
@@ -39,7 +39,7 @@ public class ServerOptionsTests
     }
 
     [Fact]
-    public void 环境变量覆盖()
+    public void EnvVarsOverride()
     {
         ServerOptions cfg = ServerOptions.Load(Env(
             ("BMSYNC_ADDR", "127.0.0.1:9999"),
@@ -54,17 +54,17 @@ public class ServerOptionsTests
     }
 
     /// <summary>
-    /// 配置写错时退回默认值并告警，而不是拒绝启动。
+    /// A mistyped config falls back to defaults with a warning instead of refusing to start.
     /// </summary>
     /// <remarks>
-    /// 理由见 <see cref="ServerOptions.EnvIntOr"/> 的注释：一个手滑的
-    /// <c>HISTORY_KEEP=30天</c> 会让用户以为服务坏了，而实际按默认值跑就能同步。
+    /// Rationale in the <see cref="ServerOptions.EnvIntOr"/> note: a slip like
+    /// <c>HISTORY_KEEP=30days</c> would look like a broken service when defaults would sync fine.
     /// </remarks>
     [Fact]
-    public void 非法数字退回默认值()
+    public void InvalidNumbersFallBackToDefaults()
     {
         ServerOptions cfg = ServerOptions.Load(Env(
-            ("BMSYNC_HISTORY_KEEP", "很多"),
+            ("BMSYNC_HISTORY_KEEP", "lots"),
             ("BMSYNC_TOMBSTONE_TTL_DAYS", "abc")));
 
         Assert.Equal(30, cfg.HistoryKeep);
@@ -77,27 +77,27 @@ public class ServerOptionsTests
         var token = new string('x', 40);
 
         data.Add(
-            "token 未设置",
+            "token unset",
             new Dictionary<string, string?> { ["BMSYNC_TOKEN"] = null },
             "BMSYNC_TOKEN");
 
         data.Add(
-            "token 太短",
+            "token too short",
             new Dictionary<string, string?> { ["BMSYNC_TOKEN"] = "short" },
             "BMSYNC_TOKEN");
 
         data.Add(
-            "token 恰好 31 字符",
+            "token exactly 31 chars",
             new Dictionary<string, string?> { ["BMSYNC_TOKEN"] = new string('x', 31) },
             "BMSYNC_TOKEN");
 
         data.Add(
-            "快照份数为 0",
+            "zero snapshots kept",
             new Dictionary<string, string?> { ["BMSYNC_TOKEN"] = token, ["BMSYNC_HISTORY_KEEP"] = "0" },
             "HISTORY_KEEP");
 
         data.Add(
-            "墓碑 TTL 不足一天",
+            "tombstone TTL under a day",
             new Dictionary<string, string?> { ["BMSYNC_TOKEN"] = token, ["BMSYNC_TOMBSTONE_TTL_DAYS"] = "0" },
             "TOMBSTONE");
 
@@ -106,19 +106,19 @@ public class ServerOptionsTests
 
     [Theory]
     [MemberData(nameof(RejectionCases))]
-    public void 拒绝非法配置(string name, Dictionary<string, string?> env, string wantSub)
+    public void RejectsInvalidConfig(string name, Dictionary<string, string?> env, string wantSub)
     {
         InvalidOperationException ex =
             Assert.Throws<InvalidOperationException>(() => ServerOptions.Load(env));
 
-        Assert.False(string.IsNullOrEmpty(name)); // 场景名用于定位，保留在参数里
+        Assert.False(string.IsNullOrEmpty(name)); // Case names aid triage, hence kept as parameters
 
         Assert.Contains(wantSub, ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    /// <summary>token 恰好 32 字符是下限，必须通过。</summary>
+    /// <summary>A token of exactly 32 chars is the minimum and must pass.</summary>
     [Fact]
-    public void 接受32字符token()
+    public void Accepts32CharToken()
     {
         var cfg = ServerOptions.Load(new Dictionary<string, string?>
         {
@@ -131,7 +131,7 @@ public class ServerOptionsTests
     }
 
     [Fact]
-    public void EnvOr_未设置时用默认值()
+    public void EnvOr_UsesDefaultWhenUnset()
     {
         Assert.Equal("fallback", ServerOptions.EnvOr(new Dictionary<string, string?>(), "X", "fallback"));
         Assert.Equal("fallback", ServerOptions.EnvOr(new Dictionary<string, string?> { ["X"] = "" }, "X", "fallback"));
@@ -140,12 +140,12 @@ public class ServerOptionsTests
 }
 
 /// <summary>
-/// 限流器测试，对应 限流器的测试用例（同上）。
+/// Rate-limiter tests, mirroring the rate-limiter test cases.
 /// </summary>
 public class RateLimiterTests
 {
     [Fact]
-    public void 窗口内超限被拒()
+    public void OverLimitWithinWindowIsRejected()
     {
         RateLimiter rl = new(2, TimeSpan.FromMinutes(1));
 
@@ -155,7 +155,7 @@ public class RateLimiterTests
     }
 
     [Fact]
-    public void 不同来源互不影响()
+    public void DifferentSourcesDoNotInterfere()
     {
         RateLimiter rl = new(1, TimeSpan.FromMinutes(1));
 
@@ -165,7 +165,7 @@ public class RateLimiterTests
     }
 
     [Fact]
-    public void 窗口过期后重新放行()
+    public void ReadmittedAfterWindowExpires()
     {
         RateLimiter rl = new(2, TimeSpan.FromMinutes(1));
 
@@ -173,18 +173,18 @@ public class RateLimiterTests
         rl.Allow("1.1.1.1");
         Assert.False(rl.Allow("1.1.1.1"));
 
-        // 把桶的起点推到过去，模拟窗口已滑过
+        // Push the bucket start into the past, simulating a slid window
         rl.SeedBucket("1.1.1.1", 2, DateTimeOffset.UtcNow.AddHours(-1));
         Assert.True(rl.Allow("1.1.1.1"));
     }
 
     [Fact]
-    public void GC清理过期桶()
+    public void GcReapsExpiredBuckets()
     {
         RateLimiter rl = new(5, TimeSpan.FromMinutes(1));
         Assert.True(rl.Allow("1.1.1.1"));
 
-        // 把桶与 lastGC 都推到过去，下一次 Allow 就会触发清理
+        // Push both the bucket and lastGC into the past so the next Allow triggers cleanup
         rl.SeedBucket("1.1.1.1", 1, DateTimeOffset.UtcNow.AddHours(-1));
         rl.ForceGcDue();
 
@@ -195,27 +195,26 @@ public class RateLimiterTests
     }
 
     [Fact]
-    public void 未过窗口不清理()
+    public void NoCleanupBeforeWindowPasses()
     {
         RateLimiter rl = new(5, TimeSpan.FromHours(1));
         rl.Allow("1.1.1.1");
 
         rl.Allow("2.2.2.2");
 
-        // 窗口是一个小时，lastGc 才刚初始化，不该触发清理
+        // The window is an hour and lastGc was just initialized — no cleanup expected
         Assert.Equal(2, rl.BucketCount);
     }
 }
 
 /// <summary>
-/// healthcheck 子命令测试，对应
-/// healthcheck 子命令的测试用例（同上）。
+/// healthcheck subcommand tests, mirroring the healthcheck test cases.
 /// </summary>
 /// <remarks>
-/// 这是唯一会**起真进程**的一组用例，值得说清为什么值得：
-/// healthcheck 的退出码直接决定容器是否被判定为健康，测错的两个方向都很难发现 ——
-/// 误判 unhealthy 时症状是"容器反复重启"，而真正的错误日志已经被重启冲掉了；
-/// 误判 healthy 则是"挂了还显示正常"。
+/// The only suite that starts **real processes**, worth justifying:
+/// the healthcheck exit code decides container health, and both wrong directions hide well —
+/// a false unhealthy shows as "container keeps restarting" with the real log already rotated away;
+/// a false healthy is "dead but still reported healthy".
 /// </remarks>
 public class HealthcheckTests
 {
@@ -223,7 +222,7 @@ public class HealthcheckTests
         client.BaseAddress!.Authority;
 
     [Fact]
-    public async Task 对健康服务返回0()
+    public async Task ReturnsZeroForHealthyService()
     {
         await using ServerFixture f = await ServerFixture.StartAsync();
 
@@ -236,9 +235,9 @@ public class HealthcheckTests
     }
 
     [Fact]
-    public void 响应不是本服务时返回非0()
+    public void ReturnsNonZeroWhenResponseIsNotThisService()
     {
-        // 模拟反代把请求路由到了别的后端：返回 200 但 service 不对
+        // Simulate the reverse proxy routing to another backend: 200 but wrong service
         using var listener = new HttpListener();
         int port = FreePort();
         listener.Prefixes.Add($"http://127.0.0.1:{port}/");
@@ -268,20 +267,20 @@ public class HealthcheckTests
     }
 
     [Fact]
-    public void 地址非法时返回配置错误()
+    public void ReturnsBadConfigWhenAddressIsInvalid()
     {
-        // 地址无法解析是运维问题，跟服务健康无关，所以退出码是 2 而不是 1 ——
-        // 容器编排看到 2 就能区分"服务挂了"和"配置写错了"
+        // An unparseable address is an ops problem, unrelated to service health, hence exit 2 not 1 —
+        // orchestration seeing 2 can tell "service down" apart from "config mistyped"
         int code = Healthcheck.Run(new Dictionary<string, string?>
         {
-            ["BMSYNC_ADDR"] = "这不是地址",
+            ["BMSYNC_ADDR"] = "not-an-address",
         });
 
         Assert.Equal(Healthcheck.ExitBadConfig, code);
     }
 
     [Fact]
-    public void 服务未启动时返回非0()
+    public void ReturnsNonZeroWhenServiceIsDown()
     {
         int code = Healthcheck.Run(new Dictionary<string, string?>
         {
@@ -292,11 +291,11 @@ public class HealthcheckTests
     }
 
     [Fact]
-    public async Task wildcard地址被换成回环()
+    public async Task WildcardAddressRewrittenToLoopback()
     {
-        // 容器里监听的是 0.0.0.0 / ::，但从容器内自请求要连回环地址。
-        // 不做这个替换的话，容器启动后第一轮 healthcheck 必然失败，
-        // 于是编排系统一直等，容器永远起不来。
+        // Containers listen on 0.0.0.0 / ::, but self-requests from inside must use loopback.
+        // Without this rewrite the first healthcheck after container start always fails,
+        // so orchestration waits forever and the container never comes up.
         await using ServerFixture f = await ServerFixture.StartAsync();
         string authority = f.Client.BaseAddress!.Authority;
         int colon = authority.LastIndexOf(':');
@@ -313,7 +312,7 @@ public class HealthcheckTests
         }
     }
 
-    /// <summary>找一个当前空闲的端口。</summary>
+    /// <summary>Find a currently free port.</summary>
     private static int FreePort()
     {
         System.Net.Sockets.TcpListener l = new(System.Net.IPAddress.Loopback, 0);
@@ -325,7 +324,7 @@ public class HealthcheckTests
 }
 
 /// <summary>
-/// 进程入口测试，对应 进程入口的测试用例（同上）。
+/// Process-entry tests, mirroring the process-entry test cases.
 /// </summary>
 public class CliTests
 {
@@ -350,7 +349,7 @@ public class CliTests
     }
 
     [Fact]
-    public void configCheck_合法配置通过()
+    public void ConfigCheck_ValidConfigPasses()
     {
         string data = Path.Combine(Path.GetTempPath(), "bmsync-cli-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(data);
@@ -367,25 +366,25 @@ public class CliTests
     }
 
     [Fact]
-    public void configCheck_非法配置非零退出()
+    public void ConfigCheck_InvalidConfigExitsNonZero()
     {
         int code = RunCli(["--config-check"], new Dictionary<string, string?>
         {
-            ["BMSYNC_TOKEN"] = "太短",
+            ["BMSYNC_TOKEN"] = "too-short",
         });
 
-        // 非 0 即可：具体码在 RunServer 里区分 1（运行失败）与 2（配置无效）
+        // Any non-zero works: RunServer distinguishes 1 (run failed) from 2 (invalid config)
         Assert.NotEqual(0, code);
     }
 
     /// <summary>
-    /// 数据目录不可用时也必须失败：配置"看起来对"但服务起来就崩，
-    /// 是比配置写错更难查的一类问题。
+    /// An unusable data dir must also fail: config that "looks right" but crashes on start
+    /// is harder to diagnose than a plainly wrong config.
     /// </summary>
     [Fact]
-    public void configCheck_数据目录不可用时失败()
+    public void ConfigCheck_FailsWhenDataDirUnusable()
     {
-        // 用一个已存在的**文件**当数据目录：建目录必然失败
+        // Use an existing **file** as the data dir: creating directories is bound to fail
         string f = Path.Combine(Path.GetTempPath(), "bmsync-notdir-" + Guid.NewGuid().ToString("N"));
         File.WriteAllText(f, "x");
 
@@ -400,13 +399,13 @@ public class CliTests
     }
 
     [Fact]
-    public void healthcheck子命令路由()
+    public void HealthcheckSubcommandRouting()
     {
-        // 服务没起时应返回非 0，且**不**走到 RunServer 里的配置加载
+        // With no service up it must return non-zero **without** reaching RunServer config loading
         int code = RunCli(["healthcheck"], new Dictionary<string, string?>
         {
             ["BMSYNC_ADDR"] = "127.0.0.1:1",
-            ["BMSYNC_TOKEN"] = "未设置的短 token",
+            ["BMSYNC_TOKEN"] = "unset-short-token",
         });
 
         Assert.NotEqual(0, code);
@@ -417,6 +416,6 @@ public class CliTests
     [InlineData("0.0.0.0:8080", "http://*:8080")]
     [InlineData("127.0.0.1:9999", "http://127.0.0.1:9999")]
     [InlineData("http://example.com:80", "http://example.com:80")]
-    public void 监听地址转URL(string addr, string want) =>
+    public void ListenAddrToUrl(string addr, string want) =>
         Assert.Equal(want, BookmarkSync.Cli.Cli.ToUrl(addr));
 }

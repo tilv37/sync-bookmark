@@ -1,26 +1,26 @@
 namespace BookmarkSync.Server;
 
 /// <summary>
-/// 服务端的全部运行期配置。全部来自环境变量，便于容器化部署。
+/// All server runtime config. Sourced entirely from env vars for containerized deploys.
 /// </summary>
 public sealed class ServerOptions
 {
     /// <summary>
-    /// HTTP 监听地址，如 ":8080"。可能与 <see cref="DataDir"/> 分属不同来源
-    /// （前者来自 BMSYNC_ADDR/flag，后者来自 BMSYNC_DATA），故单独保留。
+    /// HTTP listen address, e.g. ":8080". May come from a different source than
+    /// <see cref="DataDir"/> (the former from BMSYNC_ADDR/flag, the latter from BMSYNC_DATA), so kept separate.
     /// </summary>
     public required string Addr { get; init; }
 
-    /// <summary>Bearer 令牌，客户端必须在每个请求的 Authorization 头携带。</summary>
+    /// <summary>Bearer token; clients must send it on every request Authorization header.</summary>
     public required string Token { get; init; }
 
-    /// <summary>state.json / conflicts.json / history/ 所在目录。</summary>
+    /// <summary>Directory holding state.json / conflicts.json / history/.</summary>
     public required string DataDir { get; init; }
 
-    /// <summary>保留的历史快照份数。</summary>
+    /// <summary>Number of history snapshots to keep.</summary>
     public int HistoryKeep { get; init; }
 
-    /// <summary>墓碑（已删除项）的保留时长，超期后由 GC 清理。</summary>
+    /// <summary>How long tombstones (deleted items) are kept before GC reaps them.</summary>
     public TimeSpan TombstoneTtl { get; init; }
 
     public const string DefaultAddr = ":8080";
@@ -28,13 +28,13 @@ public sealed class ServerOptions
     public const int DefaultHistoryKeep = 30;
     public const int MinTokenLen = 32;
 
-    /// <summary>本服务在 /api/health 里自报的名字。</summary>
+    /// <summary>Service name self-reported at /api/health.</summary>
     public const string ServiceName = "bmsync";
 
     /// <summary>
-    /// 从环境变量读取并校验配置。
+    /// Load and validate config from environment variables.
     /// </summary>
-    /// <exception cref="InvalidOperationException">配置非法时抛出，调用方应据此拒绝启动。</exception>
+    /// <exception cref="InvalidOperationException">Thrown on invalid config; callers should refuse to start.</exception>
     public static ServerOptions Load(IReadOnlyDictionary<string, string?>? env = null)
     {
         IReadOnlyDictionary<string, string?> e = env ?? ReadProcessEnv();
@@ -51,19 +51,18 @@ public sealed class ServerOptions
         if (cfg.Token.Length < MinTokenLen)
         {
             throw new InvalidOperationException(
-                $"BMSYNC_TOKEN 未设置或短于 {MinTokenLen} 字符（当前 {cfg.Token.Length}）" +
-                "——请设置 `openssl rand -hex 32` 的输出");
+                $"BMSYNC_TOKEN is missing or shorter than {MinTokenLen} chars (got {cfg.Token.Length}) — set it to the output of `openssl rand -hex 32`");
         }
 
         if (cfg.HistoryKeep < 1)
         {
-            throw new InvalidOperationException($"BMSYNC_HISTORY_KEEP 必须 ≥ 1，当前 {cfg.HistoryKeep}");
+            throw new InvalidOperationException($"BMSYNC_HISTORY_KEEP must be >= 1, got {cfg.HistoryKeep}");
         }
 
         if (cfg.TombstoneTtl < TimeSpan.FromDays(1))
         {
             throw new InvalidOperationException(
-                $"BMSYNC_TOMBSTONE_TTL_DAYS 过短（{cfg.TombstoneTtl}），墓碑太早清理会导致删除同步失效");
+                $"BMSYNC_TOMBSTONE_TTL_DAYS too short ({cfg.TombstoneTtl}), cleaning tombstones too early breaks delete propagation");
         }
 
         return cfg;
@@ -80,18 +79,18 @@ public sealed class ServerOptions
         return d;
     }
 
-    /// <summary>环境变量优先，未设置时用默认值。</summary>
+    /// <summary>Env var wins; fall back to the default when unset.</summary>
     public static string EnvOr(IReadOnlyDictionary<string, string?> env, string key, string fallback) =>
         env.TryGetValue(key, out string? v) && !string.IsNullOrEmpty(v) ? v : fallback;
 
     /// <summary>
-    /// 读整数环境变量。
+    /// Read an integer env var.
     /// </summary>
     /// <remarks>
-    /// 解析失败时<b>退回默认值</b>而不是抛异常：配置写错时宁可行为不理想，
-    /// 也不要起不来。理由同 Go 版 <c>envIntOr</c>：一个手滑的
-    /// BMSYNC_HISTORY_KEEP=30天 会让用户以为服务坏了，而实际只要按默认值
-    /// 跑就能同步。
+    /// On parse failure <b>fall back to the default</b> instead of throwing: a typoed
+    /// config should degrade rather than prevent startup. Same rationale as the Go
+    /// <c>envIntOr</c>: a slip like BMSYNC_HISTORY_KEEP=30d would look like a broken
+    /// service when running on defaults would sync fine.
     /// </remarks>
     public static int EnvIntOr(IReadOnlyDictionary<string, string?> env, string key, int fallback)
     {
@@ -110,7 +109,7 @@ public sealed class ServerOptions
         return fallback;
     }
 
-    /// <summary>读"天数"环境变量，转换成 <see cref="TimeSpan"/>。</summary>
+    /// <summary>Read a "days" env var and convert it to <see cref="TimeSpan"/>.</summary>
     public static TimeSpan EnvDurationDaysOr(
         IReadOnlyDictionary<string, string?> env, string key, TimeSpan fallback)
     {
@@ -130,5 +129,5 @@ public sealed class ServerOptions
     }
 
     private static void WarnBadNumber(string key, string value, string fallback) =>
-        Console.Error.WriteLine($"环境变量 {key}=\"{value}\" 不是合法整数，使用默认值 {fallback}");
+        Console.Error.WriteLine($"env var {key}=\"{value}\" is not a valid integer, using default {fallback}");
 }
