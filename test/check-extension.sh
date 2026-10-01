@@ -214,5 +214,19 @@ for rid in toolbar_____ menu________ unfiled_____ mobile______; do
     fi
 done
 
+# ── 10. AMO data-collection disclosure present ───────────────────────
+# New AMO submissions are rejected without
+# browser_specific_settings.gecko.data_collection_permissions.
+# This extension uploads the full bookmark tree to the user's own server,
+# so "required" must include bookmarksInfo (see extensionworkshop docs
+# "Firefox built-in consent for data collection and transmission").
+section "10. AMO data-collection disclosure present"
+if grep -q '"data_collection_permissions"' "$EXT/manifest.json" \
+   && grep -q '"bookmarksInfo"' "$EXT/manifest.json"; then
+    ok "data_collection_permissions requires bookmarksInfo"
+else
+    bad "manifest lacks data_collection_permissions/bookmarksInfo — AMO rejects the upload"
+fi
+
 printf '\n\033[1mResult: %d passed, %d failed\033[0m\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

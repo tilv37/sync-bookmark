@@ -16,6 +16,13 @@ versions. Bump `manifest.json` `version` for every signed upload, and keep the
 gecko `id` stable so updates apply cleanly. Temporary `about:debugging` loads
 stay unsigned for development.
 
+New AMO submissions must declare data collection in the manifest
+(`browser_specific_settings.gecko.data_collection_permissions`, mandatory
+since Nov 2025) — the upload is rejected without it. This extension declares
+`"required": ["bookmarksInfo"]`: the full bookmark tree (names, URLs, folder
+names) is transmitted to the user's own server, which is the extension's
+stated purpose. `test/check-extension.sh` §10 guards this declaration.
+
 The zip includes `extension/icon.png` (600×600 source): it serves as the
 toolbar icon (`action.default_icon`), the add-on listing icons (`icons`
 48/96, scaled by Firefox), the popup/options headers, and the options-tab
