@@ -2,8 +2,9 @@
 //
 // WARNING: Firefox MV3 background.scripts are **classic scripts** without
 // import/export support. Anything needing ES modules must go through dynamic
-// import(). (`background.type: "module"` needs Firefox 121+; this project
-// baselines 115.)
+// import(). (`background.type: "module"` needs Firefox 121+; the manifest
+// pins strict_min_version 140, but the classic event-page style keeps the
+// same build working on 121–139 as well.)
 //
 // ── Sync mutex ────────────────────────────────────────────────────────
 //

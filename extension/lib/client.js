@@ -30,10 +30,10 @@ export function normalizeBaseUrl(raw) {
   } catch {
     return '';
   }
-  if (url.protocol !== 'https:' && url.hostname !== 'localhost' && url.hostname !== '127.0.0.1') {
-    // Bookmark URLs travel over the public internet; cleartext HTTP exposes browsing history.
-    return '';
-  }
+  // Both schemes are accepted: this is a self-hosted server the user configures,
+  // so LAN/tunnel http:// deployments must work too. The default when the scheme
+  // is omitted stays https:// (line above). Cleartext http exposes bookmark URLs;
+  // production setups should terminate TLS at a reverse proxy (docs/DEPLOYMENT.md).
   return `${url.origin}/api`;
 }
 

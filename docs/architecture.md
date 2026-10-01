@@ -309,7 +309,10 @@ Pure ESM, zero deps, no build. `about:debugging` → load
 
 ## 8. HTTP API
 
-Base `/api`, HTTPS only (terminated at NPM). `GET /api/health` is
+Base `/api`. HTTPS is the recommended deployment (terminated at NPM); plain
+HTTP is accepted for LAN/tunnel setups — the extension asks for
+`http://*/*` or `https://*/*` as optional host permission accordingly.
+`GET /api/health` is
 unauthenticated (used by the settings "Test connection" button).
 
 | Method | Path | Auth | Purpose |
